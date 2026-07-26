@@ -36,6 +36,36 @@ esp_err_t drv8833_init(drv8833_t *drv, const drv8833_pwm_cfg_t *pwm_cfg)
 {
     if (!drv || !pwm_cfg) return ESP_ERR_INVALID_ARG;
 
+    // Disable the bridge before touching PWM inputs. This is especially
+    // important on the current board, whose AIN1 net is routed to GPIO46.
+    gpio_config_t out_cfg = {
+        .pin_bit_mask = (1ULL << drv->nsleep_gpio),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&out_cfg), TAG, "nsleep cfg");
+    ESP_RETURN_ON_ERROR(gpio_set_level(drv->nsleep_gpio, 0), TAG, "nsleep low");
+
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(drv->ain1_gpio) ||
+        !GPIO_IS_VALID_OUTPUT_GPIO(drv->ain2_gpio) ||
+        !GPIO_IS_VALID_OUTPUT_GPIO(drv->bin1_gpio) ||
+        !GPIO_IS_VALID_OUTPUT_GPIO(drv->bin2_gpio)) {
+        ESP_LOGE(TAG, "invalid motor output GPIO; bridge remains asleep");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // nFAULT is an open-drain input on DRV8833.
+    gpio_config_t in_cfg = {
+        .pin_bit_mask = (1ULL << drv->nfault_gpio),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&in_cfg), TAG, "nfault cfg");
+
     // High-speed timer for motors
     const ledc_timer_config_t tim = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
@@ -72,27 +102,6 @@ esp_err_t drv8833_init(drv8833_t *drv, const drv8833_pwm_cfg_t *pwm_cfg)
     ESP_RETURN_ON_ERROR(ledc_channel_config(&ch_ain2), TAG, "ch ain2");
     ESP_RETURN_ON_ERROR(ledc_channel_config(&ch_bin1), TAG, "ch bin1");
     ESP_RETURN_ON_ERROR(ledc_channel_config(&ch_bin2), TAG, "ch bin2");
-
-    // nsleep as output, default sleep(disable driver) until explicitly enabled
-    gpio_config_t out_cfg = {
-        .pin_bit_mask = (1ULL << drv->nsleep_gpio),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&out_cfg), TAG, "nsleep cfg");
-    ESP_RETURN_ON_ERROR(gpio_set_level(drv->nsleep_gpio, 0), TAG, "nsleep low");
-
-    // nFault as input with pull-up (open-drain output typical)
-    gpio_config_t in_cfg = {
-        .pin_bit_mask = (1ULL << drv->nfault_gpio),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&in_cfg), TAG, "nfault cfg");
 
     ESP_LOGI(TAG, "PWM freq=%dHz res=%dbit max_duty=%" PRIu32, pwm_cfg->pwm_freq_hz, pwm_cfg->pwm_resolution, s_max_duty);
     return ESP_OK;

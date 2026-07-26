@@ -5,7 +5,8 @@ idf_component_register(
         "drv8833.c"
         "servo_pwm.c"
         "flash_storage.c"
-        "ble_control.c"
+        "wifi_control.c"
     INCLUDE_DIRS "."
-    REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_ledc esp_timer nvs_flash bt
+    REQUIRES driver esp_timer nvs_flash
+             esp_wifi esp_event esp_netif esp_http_server
 )
