@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""自动发现局域网中的机器人并启动桌面控制界面。
+
+常用方式：
+    python tools/start_robot_control.py
+    python tools/start_robot_control.py --url http://172.26.96.61
+    python tools/start_robot_control.py --find-only
+
+脚本只探测只读的 ``GET /api/v1/device``，不会 ARM 或发送运动命令。
+找到设备后才启动 ``robot_control_gui.py``。
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import socket
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+TOOLS_DIR = Path(__file__).resolve().parent
+GUI_PATH = TOOLS_DIR / "robot_control_gui.py"
+DEVICE_PATH = "/api/v1/device"
+RESCUE_URL = "http://192.168.4.1"
+DEFAULT_TIMEOUT_SECONDS = 0.30
+DEFAULT_WORKERS = 48
+
+
+def normalize_url(value: str) -> str:
+    """把用户输入统一为不带结尾斜杠的 HTTP 基地址。"""
+    value = value.strip().rstrip("/")
+    if not value:
+        raise ValueError("设备地址不能为空")
+    if not value.startswith(("http://", "https://")):
+        value = "http://" + value
+    return value
+
+
+def is_robot_device(payload: object) -> bool:
+    """严格识别本项目设备，避免把同网段的普通网页误认为机器人。"""
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("api_version") == 1
+        and payload.get("target") == "esp32s3"
+    )
+
+
+def probe_device(base_url: str, timeout: float) -> dict[str, object] | None:
+    """探测一个地址；失败只表示该候选不可用，不中断整个局域网扫描。"""
+    request = Request(
+        normalize_url(base_url) + DEVICE_PATH,
+        headers={"Accept": "application/json", "Connection": "close"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8", errors="strict"))
+    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if is_robot_device(payload) else None
+
+
+def default_route_ipv4() -> ipaddress.IPv4Address | None:
+    """查询默认 IPv4 路由所使用的本机地址，不会真正发送 UDP 数据。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return ipaddress.IPv4Address(sock.getsockname()[0])
+    except (OSError, ipaddress.AddressValueError):
+        return None
+    finally:
+        sock.close()
+
+
+def local_ipv4_addresses() -> list[ipaddress.IPv4Address]:
+    """枚举可用 IPv4，兼容电脑同时连接有线网和手机热点的情况。"""
+    addresses: set[ipaddress.IPv4Address] = set()
+    default = default_route_ipv4()
+    if default is not None:
+        addresses.add(default)
+    try:
+        _, _, host_addresses = socket.gethostbyname_ex(socket.gethostname())
+    except OSError:
+        host_addresses = []
+    for value in host_addresses:
+        try:
+            address = ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError:
+            continue
+        if not address.is_loopback and not address.is_link_local:
+            addresses.add(address)
+    return sorted(addresses, key=int)
+
+
+def subnet_candidates(local_ip: ipaddress.IPv4Address | None) -> Iterable[str]:
+    """生成当前 /24 局域网候选；手机热点和本项目现场网络均使用 /24。"""
+    if local_ip is None or local_ip.is_loopback or local_ip.is_link_local:
+        return ()
+    network = ipaddress.IPv4Network(f"{local_ip}/24", strict=False)
+    return (f"http://{host}" for host in network.hosts() if host != local_ip)
+
+
+def discover_device(
+    explicit_url: str | None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    workers: int = DEFAULT_WORKERS,
+) -> tuple[str, dict[str, object]] | None:
+    """按“指定地址、环境变量、救援地址、当前网段”的顺序寻找设备。"""
+    preferred: list[str] = []
+    for candidate in (explicit_url, os.environ.get("ROBOT_DEVICE_URL"), RESCUE_URL):
+        if candidate:
+            normalized = normalize_url(candidate)
+            if normalized not in preferred:
+                preferred.append(normalized)
+
+    for candidate in preferred:
+        # 已知地址只探测少数几个，允许更宽裕的超时；局域网批量扫描仍使用短超时。
+        payload = probe_device(candidate, max(timeout, 1.0))
+        if payload is not None:
+            return candidate, payload
+
+    candidates: list[str] = []
+    seen: set[str] = set(preferred)
+    for local_ip in local_ipv4_addresses():
+        for candidate in subnet_candidates(local_ip):
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+    if not candidates:
+        return None
+
+    # 并发只用于只读设备信息探测；一旦发现目标便取消尚未开始的请求。
+    executor = ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {executor.submit(probe_device, url, timeout): url for url in candidates}
+    try:
+        for future in as_completed(futures):
+            payload = future.result()
+            if payload is not None:
+                found_url = futures[future]
+                for pending in futures:
+                    pending.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                return found_url, payload
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    return None
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", help="已知设备地址；仍会校验 /api/v1/device")
+    parser.add_argument(
+        "--find-only",
+        action="store_true",
+        help="只打印发现结果，不启动图形界面（用于诊断和自动化）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"单个候选探测超时，默认 {DEFAULT_TIMEOUT_SECONDS:.2f} 秒",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.timeout <= 0:
+        print("错误：--timeout 必须大于 0", file=sys.stderr)
+        return 2
+
+    local_addresses = local_ipv4_addresses()
+    address_text = ", ".join(map(str, local_addresses)) or "未检测到"
+    print(f"电脑当前局域网地址：{address_text}")
+    print("正在寻找 ESP32-S3 机器人……")
+    found = discover_device(args.url, timeout=args.timeout)
+    if found is None:
+        print("未找到机器人。请确认：")
+        print("  1. ESP32 已上电并完成启动；")
+        print("  2. 电脑和 ESP32 连接同一个 2.4 GHz 局域网；")
+        print("  3. 或电脑已连接救援热点 ESP32-Robot；")
+        print("  4. 也可以用 --url http://设备IP 指定地址。")
+        return 1
+
+    base_url, device = found
+    print(f"已找到机器人：{base_url}")
+    print(
+        "设备信息："
+        f"target={device.get('target')} api=v{device.get('api_version')} "
+        f"build={device.get('build_date', '?')} {device.get('build_time', '?')}"
+    )
+    if args.find_only:
+        return 0
+
+    if not GUI_PATH.is_file():
+        print(f"错误：找不到图形界面 {GUI_PATH}", file=sys.stderr)
+        return 1
+
+    print("正在启动电脑控制界面……")
+    completed = subprocess.run([sys.executable, str(GUI_PATH), "--url", base_url], check=False)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

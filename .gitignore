@@ -18,8 +18,7 @@
 
 # Build artifacts and directories
 **/build/
-build/
-build-stale-*/
+/build*/
 *.o
 *.a
 *.out
@@ -85,3 +84,10 @@ Desktop.ini
 .jlceda-mcp-src/
 codex-easyeda-mcp/
 %SystemDrive%/
+.codex_tmp/
+/tmp/
+/outputs/
+.pio/
+
+# Local network credentials. Keep only the example file in Git.
+/components/robot_controller/wifi_credentials.h
