@@ -1,5 +1,6 @@
 # 文档索引
 
+- [`QUICK_START.md`](QUICK_START.md)：新人从环境配置到无运动真机验证的快速上手指南。
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：当前软件架构和数据流。
 - [`CONTROL_PROTOCOL_V1.md`](CONTROL_PROTOCOL_V1.md)：冻结的 HTTP v1 协议。
 - [`ROADMAP.md`](ROADMAP.md)：P0/P1/P2 路线图。

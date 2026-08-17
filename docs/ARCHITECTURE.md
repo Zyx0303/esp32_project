@@ -1,5 +1,18 @@
 # ESP32-S3 机器人控制器概要
 
+## 可插拔控制策略
+
+`components/robot_controller/control_strategy.h` 预留了嵌入式闭环控制接口。策略可以读取
+上一周期的完整状态和 IMU 原始数据，并输出差速目标、左右电机目标及可选舵机角度。
+
+当前固件默认不注册任何策略，继续使用 HTTP/UART 手动控制。未来实现 PID、轨迹跟踪、
+姿态闭环或 CPG 时，应在 `app_control_start()` 前调用
+`app_control_register_strategy()`。策略由现有 100 Hz `control_task` 调用，输出仍通过统一
+`robot_command_t` 和 `control_manager_submit()`，不得直接访问 PWM、GPIO 或 I2C。
+
+注册策略后，它在 ARM 期间拥有运动目标；不应同时把手动命令当作另一套持续控制器。
+退出 ARM、急停或故障时会调用策略的 `reset` 回调，以清除积分量和历史状态。
+
 ## 目标
 
 - 使用 Wi-Fi 而不是蓝牙进行无线控制
