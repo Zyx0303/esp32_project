@@ -48,6 +48,45 @@ class GuiContractTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, self.gui)
 
+    def test_help_explains_every_interactive_control(self) -> None:
+        self.assertIn('text="帮助  F1"', self.gui)
+        self.assertIn("def show_help", self.gui)
+        for label in (
+            "连接 / 刷新",
+            "ARM 解锁",
+            "DISARM 锁定",
+            "急停",
+            "清除故障",
+            "速度滑块",
+            "转向滑块",
+            "◀ 后退 / 前进 ▶",
+            "■ 停止",
+            "舵机角度滑块",
+            "0° / 90° / 180°",
+            "Motor A / Motor B 滑块",
+            "开始独立输出",
+            "双电机归零",
+            "GPIO35 置位",
+            "GPIO35 释放",
+            "IMU 状态",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, self.gui)
+
+    def test_gui_has_human_centered_dashboard_theme(self) -> None:
+        for token in (
+            "COLORS =",
+            "class ToolTip",
+            'style="Primary.TButton"',
+            'style="Danger.TButton"',
+            "ttk.Notebook",
+            'text="设备控制"',
+            'text="诊断与日志"',
+            "self.speed_var = tk.IntVar(value=10)",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.gui)
+
 
 if __name__ == "__main__":
     unittest.main()

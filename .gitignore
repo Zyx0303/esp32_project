@@ -16,6 +16,10 @@
 # Log files
 *.log
 
+# Microsoft Word documents
+*.doc
+*.docx
+*.md
 # Build artifacts and directories
 **/build/
 /build*/

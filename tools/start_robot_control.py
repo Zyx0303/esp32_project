@@ -19,9 +19,10 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -30,7 +31,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 GUI_PATH = TOOLS_DIR / "robot_control_gui.py"
 DEVICE_PATH = "/api/v1/device"
 RESCUE_URL = "http://192.168.4.1"
-DEFAULT_TIMEOUT_SECONDS = 0.30
+DEFAULT_TIMEOUT_SECONDS = 0.80
 DEFAULT_WORKERS = 48
 
 
@@ -157,6 +158,259 @@ def discover_device(
     return None
 
 
+def discover_devices(
+    explicit_url: str | None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    workers: int = DEFAULT_WORKERS,
+    on_found: Callable[[str, dict[str, object]], None] | None = None,
+) -> list[tuple[str, dict[str, object]]]:
+    """扫描所有候选地址，返回已确认身份的机器人列表。"""
+    preferred: list[str] = []
+    for candidate in (explicit_url, os.environ.get("ROBOT_DEVICE_URL"), RESCUE_URL):
+        if candidate:
+            normalized = normalize_url(candidate)
+            if normalized not in preferred:
+                preferred.append(normalized)
+
+    candidates = list(preferred)
+    seen = set(preferred)
+    for local_ip in local_ipv4_addresses():
+        for candidate in subnet_candidates(local_ip):
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+    found: list[tuple[str, dict[str, object]]] = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {
+            executor.submit(
+                probe_device,
+                url,
+                max(timeout, 1.0) if url in preferred else timeout,
+            ): url
+            for url in candidates
+        }
+        for future in as_completed(futures):
+            payload = future.result()
+            if payload is None:
+                continue
+            item = (futures[future], payload)
+            found.append(item)
+            if on_found is not None:
+                on_found(*item)
+
+    return sorted(found, key=lambda item: item[0])
+
+
+def choose_device(timeout: float) -> str | None:
+    """打开设备扫描器，让用户选择已验证的机器人地址。"""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+    except ImportError:
+        return None
+
+    root = tk.Tk()
+    root.title("ESP32-S3 机器人设备扫描器")
+    root.geometry("760x520")
+    root.minsize(650, 440)
+    root.configure(background="#F4F7FB")
+
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure("Picker.TFrame", background="#F4F7FB")
+    style.configure("PickerCard.TFrame", background="#FFFFFF")
+    style.configure(
+        "Picker.Treeview", background="#FFFFFF", fieldbackground="#FFFFFF",
+        foreground="#172033", rowheight=34, bordercolor="#DDE5F0",
+        font=("Microsoft YaHei UI", 10),
+    )
+    style.configure(
+        "Picker.Treeview.Heading", background="#E8EEF7", foreground="#334155",
+        relief="flat", padding=(10, 8), font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    style.map("Picker.Treeview", background=[("selected", "#DBEAFE")], foreground=[("selected", "#1D4ED8")])
+    style.configure(
+        "PickerPrimary.TButton", background="#2563EB", foreground="white",
+        bordercolor="#2563EB", padding=(16, 9), font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    style.map("PickerPrimary.TButton", background=[("active", "#1D4ED8")])
+    style.configure(
+        "PickerSecondary.TButton", background="#EDF2F7", foreground="#172033",
+        bordercolor="#D7E0EB", padding=(14, 9), font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    style.map("PickerSecondary.TButton", background=[("active", "#E2E8F0")])
+    style.configure("Picker.TEntry", padding=8, fieldbackground="white", bordercolor="#DDE5F0")
+
+    result: list[str | None] = [None]
+    rows: dict[str, str] = {}
+    scanning = [False]
+    closed = [False]
+
+    header = tk.Frame(root, background="#0F172A", padx=20, pady=15)
+    header.pack(fill="x")
+    tk.Label(
+        header, text="DEVICE DISCOVERY", background="#0F172A", foreground="#60A5FA",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w")
+    tk.Label(
+        header, text="选择一台机器人", background="#0F172A", foreground="white",
+        font=("Microsoft YaHei UI", 19, "bold"),
+    ).pack(anchor="w")
+    tk.Label(
+        header, text="自动验证设备身份，再进入安全控制台", background="#0F172A",
+        foreground="#94A3B8", font=("Microsoft YaHei UI", 10),
+    ).pack(anchor="w", pady=(2, 0))
+
+    outer = ttk.Frame(root, style="Picker.TFrame", padding=18)
+    outer.pack(fill="both", expand=True)
+    outer.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+
+    local_text = ", ".join(map(str, local_ipv4_addresses())) or "未检测到"
+    ttk.Label(
+        outer, text=f"电脑局域网地址  {local_text}", background="#F4F7FB",
+        foreground="#64748B", font=("Microsoft YaHei UI", 9),
+    ).grid(
+        row=0, column=0, sticky="w", pady=(0, 10)
+    )
+
+    tree = ttk.Treeview(
+        outer, columns=("address", "build"), show="headings", height=8,
+        style="Picker.Treeview",
+    )
+    tree.heading("address", text="设备地址")
+    tree.heading("build", text="固件版本")
+    tree.column("address", width=260, anchor="w")
+    tree.column("build", width=280, anchor="w")
+    tree.grid(row=1, column=0, sticky="nsew")
+
+    status_var = tk.StringVar(value="准备扫描")
+    ttk.Label(
+        outer, textvariable=status_var, background="#F4F7FB", foreground="#2563EB",
+        font=("Microsoft YaHei UI", 9, "bold"),
+    ).grid(row=2, column=0, sticky="w", pady=(10, 8))
+
+    manual = ttk.Frame(outer, style="PickerCard.TFrame", padding=10)
+    manual.grid(row=3, column=0, sticky="ew")
+    manual.columnconfigure(1, weight=1)
+    ttk.Label(
+        manual, text="手动地址", background="#FFFFFF", foreground="#334155",
+        font=("Microsoft YaHei UI", 10, "bold"),
+    ).grid(row=0, column=0, padx=(0, 10))
+    manual_var = tk.StringVar()
+    manual_entry = ttk.Entry(manual, textvariable=manual_var, style="Picker.TEntry")
+    manual_entry.grid(row=0, column=1, sticky="ew")
+    ttk.Label(
+        manual, text="例：http://192.168.4.1", background="#FFFFFF", foreground="#94A3B8",
+        font=("Microsoft YaHei UI", 9),
+    ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+
+    buttons = ttk.Frame(outer, style="Picker.TFrame")
+    buttons.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+    buttons.columnconfigure(0, weight=1)
+
+    ttk.Button(
+        buttons,
+        text="帮助",
+        style="PickerSecondary.TButton",
+        command=lambda: messagebox.showinfo(
+            "设备扫描帮助",
+            "重新扫描：探测当前局域网内运行本项目固件的 ESP32。\n\n"
+            "连接所选设备：验证列表中选中的设备，然后打开控制窗口。也可以双击列表项。\n\n"
+            "手动地址：已知机器人 IP 时输入，例如 http://192.168.4.1；留空则使用列表选择。\n\n"
+            "扫描不到时：确认 ESP32 已启动、电脑与它在同一 2.4 GHz 局域网，"
+            "或连接救援热点 ESP32-Robot 后重新扫描。",
+            parent=root,
+        ),
+    ).grid(row=0, column=0, sticky="w")
+
+    scan_button = ttk.Button(buttons, text="重新扫描", style="PickerSecondary.TButton")
+    scan_button.grid(row=0, column=1, padx=(8, 0))
+    connect_button = ttk.Button(buttons, text="连接所选设备", style="PickerPrimary.TButton")
+    connect_button.grid(row=0, column=2, padx=(8, 0))
+
+    def add_result(url: str, device: dict[str, object]) -> None:
+        if closed[0] or url in rows:
+            return
+        build = f"{device.get('build_date', '?')} {device.get('build_time', '?')}"
+        item_id = tree.insert("", "end", values=(url, build))
+        rows[url] = item_id
+        if len(rows) == 1:
+            tree.selection_set(item_id)
+            tree.focus(item_id)
+        status_var.set(f"已找到 {len(rows)} 台机器人，扫描仍在继续……")
+
+    def scan_finished() -> None:
+        if closed[0]:
+            return
+        scanning[0] = False
+        scan_button.configure(state="normal")
+        status_var.set(
+            f"扫描完成，共找到 {len(rows)} 台机器人"
+            if rows
+            else "扫描完成，未找到机器人；可重新扫描或手动输入地址"
+        )
+
+    def scan_worker() -> None:
+        discover_devices(
+            None,
+            timeout=timeout,
+            on_found=lambda url, device: root.after(0, add_result, url, device),
+        )
+        if not closed[0]:
+            root.after(0, scan_finished)
+
+    def start_scan() -> None:
+        if scanning[0]:
+            return
+        scanning[0] = True
+        rows.clear()
+        for item_id in tree.get_children():
+            tree.delete(item_id)
+        status_var.set("正在扫描当前局域网，请稍候……")
+        scan_button.configure(state="disabled")
+        threading.Thread(target=scan_worker, daemon=True).start()
+
+    def connect() -> None:
+        typed = manual_var.get().strip()
+        if typed:
+            try:
+                url = normalize_url(typed)
+            except ValueError as exc:
+                messagebox.showerror("地址错误", str(exc), parent=root)
+                return
+        else:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo("请选择设备", "请先选择扫描到的机器人，或手动输入地址。", parent=root)
+                return
+            url = str(tree.item(selection[0], "values")[0])
+
+        status_var.set(f"正在验证 {url}……")
+        root.update_idletasks()
+        if probe_device(url, max(timeout, 1.5)) is None:
+            messagebox.showerror("连接失败", f"{url} 不是可访问的机器人设备。", parent=root)
+            status_var.set("验证失败，请重新扫描或检查地址")
+            return
+        result[0] = url
+        closed[0] = True
+        root.destroy()
+
+    def close() -> None:
+        closed[0] = True
+        root.destroy()
+
+    scan_button.configure(command=start_scan)
+    connect_button.configure(command=connect)
+    tree.bind("<Double-1>", lambda _event: connect())
+    manual_entry.bind("<Return>", lambda _event: connect())
+    root.protocol("WM_DELETE_WINDOW", close)
+    root.after(100, start_scan)
+    root.mainloop()
+    return result[0]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="已知设备地址；仍会校验 /api/v1/device")
@@ -179,6 +433,15 @@ def main() -> int:
     if args.timeout <= 0:
         print("错误：--timeout 必须大于 0", file=sys.stderr)
         return 2
+
+    if not args.find_only and args.url is None:
+        selected_url = choose_device(args.timeout)
+        if selected_url is None:
+            print("未选择机器人，已取消启动。")
+            return 0
+        return subprocess.run(
+            [sys.executable, str(GUI_PATH), "--url", selected_url], check=False
+        ).returncode
 
     local_addresses = local_ipv4_addresses()
     address_text = ", ".join(map(str, local_addresses)) or "未检测到"
