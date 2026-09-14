@@ -7,7 +7,7 @@
     python tools/start_robot_control.py --find-only
 
 脚本只探测只读的 ``GET /api/v1/device``，不会 ARM 或发送运动命令。
-找到设备后才启动 ``robot_control_gui.py``。
+控制界面可离线打开；扫描仅用于发现设备地址。
 """
 
 from __future__ import annotations
@@ -74,7 +74,10 @@ def probe_device(base_url: str, timeout: float) -> dict[str, object] | None:
 
 def default_route_ipv4() -> ipaddress.IPv4Address | None:
     """查询默认 IPv4 路由所使用的本机地址，不会真正发送 UDP 数据。"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
     try:
         sock.connect(("8.8.8.8", 80))
         return ipaddress.IPv4Address(sock.getsockname()[0])
@@ -210,7 +213,10 @@ def choose_device(timeout: float) -> str | None:
     except ImportError:
         return None
 
+    from robot_control_gui import configure_chinese_fonts
+
     root = tk.Tk()
+    ui_font = configure_chinese_fonts(root)
     root.title("ESP32-S3 机器人设备扫描器")
     root.geometry("760x520")
     root.minsize(650, 440)
@@ -223,21 +229,21 @@ def choose_device(timeout: float) -> str | None:
     style.configure(
         "Picker.Treeview", background="#FFFFFF", fieldbackground="#FFFFFF",
         foreground="#172033", rowheight=34, bordercolor="#DDE5F0",
-        font=("Microsoft YaHei UI", 10),
+        font=(ui_font, 10),
     )
     style.configure(
         "Picker.Treeview.Heading", background="#E8EEF7", foreground="#334155",
-        relief="flat", padding=(10, 8), font=("Microsoft YaHei UI", 10, "bold"),
+        relief="flat", padding=(10, 8), font=(ui_font, 10, "bold"),
     )
     style.map("Picker.Treeview", background=[("selected", "#DBEAFE")], foreground=[("selected", "#1D4ED8")])
     style.configure(
         "PickerPrimary.TButton", background="#2563EB", foreground="white",
-        bordercolor="#2563EB", padding=(16, 9), font=("Microsoft YaHei UI", 10, "bold"),
+        bordercolor="#2563EB", padding=(16, 9), font=(ui_font, 10, "bold"),
     )
     style.map("PickerPrimary.TButton", background=[("active", "#1D4ED8")])
     style.configure(
         "PickerSecondary.TButton", background="#EDF2F7", foreground="#172033",
-        bordercolor="#D7E0EB", padding=(14, 9), font=("Microsoft YaHei UI", 10, "bold"),
+        bordercolor="#D7E0EB", padding=(14, 9), font=(ui_font, 10, "bold"),
     )
     style.map("PickerSecondary.TButton", background=[("active", "#E2E8F0")])
     style.configure("Picker.TEntry", padding=8, fieldbackground="white", bordercolor="#DDE5F0")
@@ -251,15 +257,15 @@ def choose_device(timeout: float) -> str | None:
     header.pack(fill="x")
     tk.Label(
         header, text="DEVICE DISCOVERY", background="#0F172A", foreground="#60A5FA",
-        font=("Segoe UI", 9, "bold"),
+        font=(ui_font, 9, "bold"),
     ).pack(anchor="w")
     tk.Label(
         header, text="选择一台机器人", background="#0F172A", foreground="white",
-        font=("Microsoft YaHei UI", 19, "bold"),
+        font=(ui_font, 19, "bold"),
     ).pack(anchor="w")
     tk.Label(
         header, text="自动验证设备身份，再进入安全控制台", background="#0F172A",
-        foreground="#94A3B8", font=("Microsoft YaHei UI", 10),
+        foreground="#94A3B8", font=(ui_font, 10),
     ).pack(anchor="w", pady=(2, 0))
 
     outer = ttk.Frame(root, style="Picker.TFrame", padding=18)
@@ -270,7 +276,7 @@ def choose_device(timeout: float) -> str | None:
     local_text = ", ".join(map(str, local_ipv4_addresses())) or "未检测到"
     ttk.Label(
         outer, text=f"电脑局域网地址  {local_text}", background="#F4F7FB",
-        foreground="#64748B", font=("Microsoft YaHei UI", 9),
+        foreground="#64748B", font=(ui_font, 9),
     ).grid(
         row=0, column=0, sticky="w", pady=(0, 10)
     )
@@ -288,7 +294,7 @@ def choose_device(timeout: float) -> str | None:
     status_var = tk.StringVar(value="准备扫描")
     ttk.Label(
         outer, textvariable=status_var, background="#F4F7FB", foreground="#2563EB",
-        font=("Microsoft YaHei UI", 9, "bold"),
+        font=(ui_font, 9, "bold"),
     ).grid(row=2, column=0, sticky="w", pady=(10, 8))
 
     manual = ttk.Frame(outer, style="PickerCard.TFrame", padding=10)
@@ -296,14 +302,14 @@ def choose_device(timeout: float) -> str | None:
     manual.columnconfigure(1, weight=1)
     ttk.Label(
         manual, text="手动地址", background="#FFFFFF", foreground="#334155",
-        font=("Microsoft YaHei UI", 10, "bold"),
+        font=(ui_font, 10, "bold"),
     ).grid(row=0, column=0, padx=(0, 10))
     manual_var = tk.StringVar()
     manual_entry = ttk.Entry(manual, textvariable=manual_var, style="Picker.TEntry")
     manual_entry.grid(row=0, column=1, sticky="ew")
     ttk.Label(
         manual, text="例：http://192.168.4.1", background="#FFFFFF", foreground="#94A3B8",
-        font=("Microsoft YaHei UI", 9),
+        font=(ui_font, 9),
     ).grid(row=1, column=1, sticky="w", pady=(4, 0))
 
     buttons = ttk.Frame(outer, style="Picker.TFrame")
@@ -397,6 +403,14 @@ def choose_device(timeout: float) -> str | None:
         closed[0] = True
         root.destroy()
 
+    def open_offline() -> None:
+        result[0] = normalize_url(manual_var.get().strip() or RESCUE_URL)
+        closed[0] = True
+        root.destroy()
+
+    ttk.Button(buttons, text="直接进入控制台", style="PickerSecondary.TButton",
+               command=open_offline).grid(row=0, column=3, padx=(8, 0))
+
     def close() -> None:
         closed[0] = True
         root.destroy()
@@ -413,7 +427,7 @@ def choose_device(timeout: float) -> str | None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", help="已知设备地址；仍会校验 /api/v1/device")
+    parser.add_argument("--url", help="设备地址；未连接时也打开控制界面")
     parser.add_argument(
         "--find-only",
         action="store_true",
@@ -434,13 +448,11 @@ def main() -> int:
         print("错误：--timeout 必须大于 0", file=sys.stderr)
         return 2
 
-    if not args.find_only and args.url is None:
-        selected_url = choose_device(args.timeout)
-        if selected_url is None:
-            print("未选择机器人，已取消启动。")
-            return 0
+    if not args.find_only:
+        # Discovery is optional: show the controls immediately, even with no robot online.
+        base_url = normalize_url(args.url or os.environ.get("ROBOT_DEVICE_URL") or RESCUE_URL)
         return subprocess.run(
-            [sys.executable, str(GUI_PATH), "--url", selected_url], check=False
+            [sys.executable, str(GUI_PATH), "--url", base_url], check=False
         ).returncode
 
     local_addresses = local_ipv4_addresses()

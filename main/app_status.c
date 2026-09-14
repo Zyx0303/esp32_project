@@ -80,5 +80,8 @@ bool app_status_get(robot_status_t *status)
     portENTER_CRITICAL(&s_status_lock);
     *status = s_status_snapshot;
     portEXIT_CRITICAL(&s_status_lock);
+    if (esp_timer_get_time() - status->imu_last_update_us > 100000) {
+        status->imu_valid = false;
+    }
     return true;
 }

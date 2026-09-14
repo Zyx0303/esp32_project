@@ -11,13 +11,19 @@ http://192.168.4.1 and can also be supplied with ``--url``.
 from __future__ import annotations
 
 import argparse
+from http.client import HTTPException
 import json
 import queue
+import os
+import stat
+import uuid
+from pathlib import Path
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import scrolledtext, ttk
+from tkinter import font as tkfont
+from tkinter import messagebox, scrolledtext, ttk
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -137,6 +143,11 @@ IMU 状态
     只读显示 MPU6050 的有效标志、加速度、角速度、样本数和错误数。查看 IMU 不需要
     ARM。静止时陀螺仪应接近零，加速度合量应接近 1g，错误数不应持续增加。
 
+IMU 记录
+    点击“开始记录 IMU”在机器人上写入 100 Hz 原始数据；再次点击结束并通过 HTTP 下载。
+    文件保存在项目 imu_logs 文件夹，设备和电脑端均设置只读。断网后点击“结束 / 重试下载”。
+    分区有限，满时会自动结束；日志末尾记录丢帧计数和结束原因。
+
 状态与日志
 
 设备状态显示当前安全状态、ARM、电机和舵机输出；实时诊断显示网络、硬件故障和计数；
@@ -161,11 +172,35 @@ def normalize_base_url(value: str) -> str:
     return value
 
 
+def configure_chinese_fonts(root: tk.Misc) -> str:
+    """Select an installed CJK font instead of relying on missing Windows fonts."""
+    available = {name.casefold(): name for name in tkfont.families(root)}
+    candidates = (
+        "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
+        "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+        "WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "SimHei",
+        "Noto Sans CJK TC", "Noto Sans CJK JP",
+    )
+    family = next((available[name.casefold()] for name in candidates
+                   if name.casefold() in available),
+                  tkfont.nametofont("TkDefaultFont", root=root).actual("family"))
+    for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
+                 "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont",
+                 "TkIconFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(name, root=root).configure(family=family)
+        except tk.TclError:
+            pass
+    root.option_add("*Font", "TkDefaultFont")
+    return family
+
+
 class ToolTip:
     """Small delayed hover hint with no third-party dependency."""
 
     def __init__(self, widget: tk.Widget, message: str) -> None:
         self.widget = widget
+        self.ui_font = tkfont.nametofont("TkDefaultFont", root=widget).actual("family")
         self.message = message
         self.window: tk.Toplevel | None = None
         self.after_id: str | None = None
@@ -199,7 +234,7 @@ class ToolTip:
             foreground="#F8FAFC",
             padx=10,
             pady=7,
-            font=("Microsoft YaHei UI", 9),
+            font=(self.ui_font, 9),
         ).pack()
 
     def _hide(self, _event: tk.Event[Any] | None = None) -> None:
@@ -216,7 +251,8 @@ class RobotApi:
     def set_base_url(self, base_url: str) -> None:
         self.base_url = normalize_base_url(base_url)
 
-    def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(self, method: str, path: str, payload: dict[str, Any] | None = None, *,
+                timeout: float = REQUEST_TIMEOUT_SECONDS) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         headers = {"Accept": "application/json", "Connection": "close"}
         if body is not None:
@@ -228,7 +264,7 @@ class RobotApi:
             method=method,
         )
         try:
-            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace").strip()
@@ -251,10 +287,35 @@ class RobotApi:
     def post(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request("POST", path, payload)
 
+    def download_imu_log(self, filename: str) -> Path:
+        directory = Path(__file__).resolve().parent.parent / "imu_logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / (time.strftime("imu_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8] + ".log")
+        partial = destination.with_suffix(".part")
+        request = Request(self.base_url + "/api/v1/imu/log/download?file=" + filename, headers={"Connection": "close"})
+        try:
+            with urlopen(request, timeout=15) as response, partial.open("xb") as output:
+                expected = response.headers.get("Content-Length")
+                received = 0
+                while chunk := response.read(65536):
+                    output.write(chunk)
+                    received += len(chunk)
+                if expected is not None and received != int(expected):
+                    raise RuntimeError("日志下载不完整，请重试")
+                output.flush()
+                os.fsync(output.fileno())
+            partial.replace(destination)
+            destination.chmod(stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+        return destination
+
 
 class RobotControllerApp(tk.Tk):
     def __init__(self, base_url: str) -> None:
         super().__init__()
+        self.ui_font = configure_chinese_fonts(self)
         self.title("ESP32-S3 机器人控制器")
         self.geometry("1180x820")
         self.minsize(1040, 700)
@@ -269,6 +330,11 @@ class RobotControllerApp(tk.Tk):
         self.direct_after_id: str | None = None
         self.direct_active = False
         self.servo_after_id: str | None = None
+        self.recording = False
+        self.record_busy = False
+        self.record_url: str | None = None
+        self.record_text = tk.StringVar(value="开始记录 IMU")
+        self.record_status = tk.StringVar(value="100 Hz 原始数据 · 保存在电脑 imu_logs 文件夹")
 
         self.url_var = tk.StringVar(value=self.api.base_url)
         self.connection_var = tk.StringVar(value="● 等待连接")
@@ -302,7 +368,7 @@ class RobotControllerApp(tk.Tk):
     def _configure_style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure(".", font=("Microsoft YaHei UI", 10), background=COLORS["canvas"])
+        style.configure(".", font=(self.ui_font, 10), background=COLORS["canvas"])
         style.configure("App.TFrame", background=COLORS["canvas"])
         style.configure("Card.TFrame", background=COLORS["card"])
         style.configure(
@@ -316,32 +382,32 @@ class RobotControllerApp(tk.Tk):
         style.configure(
             "Card.TLabelframe.Label",
             background=COLORS["card"], foreground=COLORS["ink"],
-            font=("Microsoft YaHei UI", 11, "bold"),
+            font=(self.ui_font, 11, "bold"),
         )
         style.configure("Card.TLabel", background=COLORS["card"], foreground=COLORS["ink"])
         style.configure(
             "Muted.TLabel", background=COLORS["card"], foreground=COLORS["muted"],
-            font=("Microsoft YaHei UI", 9),
+            font=(self.ui_font, 9),
         )
         style.configure(
             "Value.TLabel", background=COLORS["card"], foreground=COLORS["ink"],
-            font=("Microsoft YaHei UI", 11, "bold"),
+            font=(self.ui_font, 11, "bold"),
         )
         style.configure(
             "Online.TLabel", background=COLORS["soft_green"], foreground=COLORS["green"],
-            padding=(10, 5), font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(10, 5), font=(self.ui_font, 10, "bold"),
         )
         style.configure(
             "Offline.TLabel", background=COLORS["soft_red"], foreground=COLORS["red"],
-            padding=(10, 5), font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(10, 5), font=(self.ui_font, 10, "bold"),
         )
         style.configure(
             "Safe.TLabel", background=COLORS["soft_blue"], foreground=COLORS["blue"],
-            padding=(10, 5), font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(10, 5), font=(self.ui_font, 10, "bold"),
         )
         style.configure(
             "Armed.TLabel", background="#FFF4DB", foreground=COLORS["amber"],
-            padding=(10, 5), font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(10, 5), font=(self.ui_font, 10, "bold"),
         )
         for name, color, hover in (
             ("Primary", COLORS["blue"], COLORS["blue_hover"]),
@@ -352,7 +418,7 @@ class RobotControllerApp(tk.Tk):
         ):
             style.configure(
                 f"{name}.TButton", background=color, foreground="white",
-                bordercolor=color, padding=(14, 8), font=("Microsoft YaHei UI", 10, "bold"),
+                bordercolor=color, padding=(14, 8), font=(self.ui_font, 10, "bold"),
             )
             style.map(
                 f"{name}.TButton",
@@ -361,12 +427,12 @@ class RobotControllerApp(tk.Tk):
             )
         style.configure(
             "Secondary.TButton", background="#EDF2F7", foreground=COLORS["ink"],
-            bordercolor="#D7E0EB", padding=(14, 8), font=("Microsoft YaHei UI", 10, "bold"),
+            bordercolor="#D7E0EB", padding=(14, 8), font=(self.ui_font, 10, "bold"),
         )
         style.map("Secondary.TButton", background=[("active", "#E2E8F0")])
         style.configure(
             "Header.TButton", background=COLORS["navy_soft"], foreground="#E2E8F0",
-            bordercolor="#334155", padding=(13, 7), font=("Microsoft YaHei UI", 10, "bold"),
+            bordercolor="#334155", padding=(13, 7), font=(self.ui_font, 10, "bold"),
         )
         style.map("Header.TButton", background=[("active", "#334155")])
         style.configure("TEntry", padding=8, fieldbackground="white", bordercolor=COLORS["line"])
@@ -374,7 +440,7 @@ class RobotControllerApp(tk.Tk):
         style.configure("TNotebook", background=COLORS["canvas"], borderwidth=0)
         style.configure(
             "TNotebook.Tab", background="#E8EDF5", foreground=COLORS["muted"],
-            padding=(22, 10), font=("Microsoft YaHei UI", 10, "bold"),
+            padding=(22, 10), font=(self.ui_font, 10, "bold"),
         )
         style.map(
             "TNotebook.Tab",
@@ -394,19 +460,19 @@ class RobotControllerApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         tk.Label(
             header, text="ROBOT CONTROL", background=COLORS["navy"], foreground="#60A5FA",
-            font=("Segoe UI", 9, "bold"),
+            font=(self.ui_font, 9, "bold"),
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             header, text="ESP32-S3 机器人控制台", background=COLORS["navy"], foreground="white",
-            font=("Microsoft YaHei UI", 21, "bold"),
+            font=(self.ui_font, 21, "bold"),
         ).grid(row=1, column=0, sticky="w")
         tk.Label(
             header, text="实时状态 · 安全控制 · 硬件板测", background=COLORS["navy"],
-            foreground="#94A3B8", font=("Microsoft YaHei UI", 10),
+            foreground="#94A3B8", font=(self.ui_font, 10),
         ).grid(row=2, column=0, sticky="w", pady=(3, 0))
         tk.Label(
             header, text="局域网 HTTP", background=COLORS["navy_soft"], foreground="#BFDBFE",
-            padx=12, pady=6, font=("Microsoft YaHei UI", 9, "bold"),
+            padx=12, pady=6, font=(self.ui_font, 9, "bold"),
         ).grid(row=1, column=1, padx=(12, 14))
         help_button = ttk.Button(header, text="帮助  F1", style="Header.TButton", command=self.show_help)
         help_button.grid(row=1, column=2, sticky="e")
@@ -433,6 +499,9 @@ class RobotControllerApp(tk.Tk):
             connection, text="连接 / 刷新", style="Primary.TButton", command=self.apply_url_and_refresh
         )
         connect_button.grid(row=1, column=2, pady=(10, 0))
+        self.scan_button = ttk.Button(connection, text="扫描设备（可选）",
+                                      command=self.scan_devices, style="Secondary.TButton")
+        self.scan_button.grid(row=2, column=1, sticky="w", padx=10, pady=(8, 0))
         self._tip(connect_button, "验证地址并立即刷新状态；不会解锁或驱动任何硬件。")
 
         status = ttk.Frame(top, style="Card.TFrame", padding=14)
@@ -513,7 +582,7 @@ class RobotControllerApp(tk.Tk):
         servo.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
         servo.columnconfigure(0, weight=1)
         ttk.Label(servo, text="目标角度", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(servo, textvariable=self.angle_text_var, style="Value.TLabel", font=("Microsoft YaHei UI", 22, "bold")).grid(
+        ttk.Label(servo, textvariable=self.angle_text_var, style="Value.TLabel", font=(self.ui_font, 22, "bold")).grid(
             row=1, column=0, pady=(2, 8)
         )
         angle_scale = ttk.Scale(
@@ -539,21 +608,23 @@ class RobotControllerApp(tk.Tk):
         direct.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(6, 0))
         direct.columnconfigure(1, weight=1)
         ttk.Label(direct, text="Motor A", style="Card.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Scale(
-            direct, from_=-100, to=100, variable=self.motor_a_var,
+        tk.Scale(
+            direct, from_=-100, to=100, resolution=10, orient="horizontal",
+            showvalue=False, background=COLORS["card"], highlightthickness=0, variable=self.motor_a_var,
             command=lambda value: self._on_direct_change("a", value),
         ).grid(row=0, column=1, sticky="ew", padx=10)
         ttk.Label(direct, textvariable=self.motor_a_text_var, style="Value.TLabel", width=5).grid(row=0, column=2)
         ttk.Label(direct, text="Motor B", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Scale(
-            direct, from_=-100, to=100, variable=self.motor_b_var,
+        tk.Scale(
+            direct, from_=-100, to=100, resolution=10, orient="horizontal",
+            showvalue=False, background=COLORS["card"], highlightthickness=0, variable=self.motor_b_var,
             command=lambda value: self._on_direct_change("b", value),
         ).grid(row=1, column=1, sticky="ew", padx=10, pady=(10, 0))
         ttk.Label(direct, textvariable=self.motor_b_text_var, style="Value.TLabel", width=5).grid(
             row=1, column=2, pady=(10, 0)
         )
         ttk.Label(
-            direct, text="绕过差速混合，仅用于确认通道与方向", style="Muted.TLabel"
+            direct, text="每格 10% 占空比；绕过差速混合，确认通道与方向", style="Muted.TLabel"
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
         direct_buttons = ttk.Frame(direct, style="Card.TFrame")
         direct_buttons.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 0))
@@ -592,6 +663,19 @@ class RobotControllerApp(tk.Tk):
             justify="left",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
+        self.record_button = ttk.Button(
+            auxiliary, textvariable=self.record_text, command=self.toggle_imu_recording,
+            style="Primary.TButton",
+        )
+        self.record_button.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self.download_button = ttk.Button(
+            auxiliary, text="结束 / 重试下载", command=lambda: self.toggle_imu_recording(True),
+            style="Secondary.TButton",
+        )
+        self.download_button.grid(row=5, column=1, sticky="ew", pady=(10, 0))
+        ttk.Label(auxiliary, textvariable=self.record_status, style="Muted.TLabel",
+                  wraplength=450).grid(row=6, column=0, columnspan=2, sticky="w")
+
         diagnostics_page.columnconfigure(0, weight=1)
         diagnostics_page.rowconfigure(1, weight=1)
         diagnostics = ttk.LabelFrame(
@@ -621,7 +705,7 @@ class RobotControllerApp(tk.Tk):
             log_frame, wrap=tk.WORD, state="disabled", height=16,
             background="#0B1220", foreground="#CBD5E1", insertbackground="white",
             selectbackground="#1D4ED8", relief="flat", padx=12, pady=10,
-            font=("Cascadia Mono", 9),
+            font=(self.ui_font, 9),
         )
         self.log_text.grid(row=0, column=0, sticky="nsew")
         self._log("控制台已就绪。运动前请确认硬件安全并 ARM；光板与 IMU 测试保持 DISARM。")
@@ -643,13 +727,13 @@ class RobotControllerApp(tk.Tk):
             frame,
             text="按钮功能与使用理由",
             background=COLORS["canvas"], foreground=COLORS["ink"],
-            font=("Microsoft YaHei UI", 18, "bold"),
+            font=(self.ui_font, 18, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 10))
 
         text = scrolledtext.ScrolledText(
             frame, wrap=tk.WORD, padx=16, pady=14, relief="flat",
             background=COLORS["card"], foreground=COLORS["ink"],
-            selectbackground=COLORS["blue"], font=("Microsoft YaHei UI", 10),
+            selectbackground=COLORS["blue"], font=(self.ui_font, 10),
             spacing1=2, spacing3=4,
         )
         text.grid(row=1, column=0, sticky="nsew")
@@ -676,7 +760,7 @@ class RobotControllerApp(tk.Tk):
         self.steering_text_var.set(f"{steering}%")
 
     def _on_direct_change(self, axis: str, value: str) -> None:
-        output = round(float(value))
+        output = max(-100, min(100, round(float(value) / 10) * 10))
         if axis == "a":
             self.motor_a_var.set(output)
             self.motor_a_text_var.set(f"{output}%")
@@ -692,7 +776,26 @@ class RobotControllerApp(tk.Tk):
             self.after_cancel(self.servo_after_id)
         self.servo_after_id = self.after(180, lambda: self._send_servo(angle))
 
+    def scan_devices(self) -> None:
+        if self.record_url is not None or self.drive_direction or self.direct_active:
+            self._log("请先停止电机输出并结束记录，再扫描切换设备。")
+            return
+        self.scan_button.configure(state="disabled")
+        self._log("正在后台扫描设备；未找到时仍可使用控制台和手动地址。")
+        def worker() -> None:
+            from start_robot_control import discover_device
+            try:
+                found = discover_device(None)
+                result = ApiResult("scan", True, {"url": found[0] if found else ""})
+            except Exception as exc:
+                result = ApiResult("scan", False, error=str(exc))
+            self.results.put(result)
+        threading.Thread(target=worker, daemon=True).start()
+
     def apply_url_and_refresh(self) -> None:
+        if self.record_busy or self.record_url is not None:
+            self._log("请先结束记录并完成下载，再切换设备地址。")
+            return
         try:
             self.api.set_base_url(self.url_var.get())
         except ValueError as exc:
@@ -790,10 +893,46 @@ class RobotControllerApp(tk.Tk):
             "power", "/api/v1/power", method="POST", payload={"asserted": asserted}
         )
 
+    def toggle_imu_recording(self, finish: bool = False) -> None:
+        if self.record_busy:
+            return
+        self.record_busy = True
+        self.record_button.configure(state="disabled")
+        self.download_button.configure(state="disabled")
+        base_url = self.record_url or self.api.base_url
+        self.record_url = base_url
+        should_stop = finish or self.recording
+        self.record_status.set("正在结束并下载……" if should_stop else "正在启动记录……")
+
+        def worker() -> None:
+            try:
+                api = RobotApi(base_url)
+                if should_stop:
+                    status = api.request("POST", "/api/v1/imu/log/stop", timeout=15)
+                    if not status.get("sealed"):
+                        raise RuntimeError("日志尚未封存：" + str(status.get("error", "无可下载日志")))
+                    saved = api.download_imu_log(str(status["file"]))
+                    result = ApiResult("imu_record", True, {
+                        "recording": False, "saved": str(saved), "error": status.get("error", ""),
+                        "dropped": status.get("dropped", 0),
+                    })
+                else:
+                    status = api.request("POST", "/api/v1/imu/log/start", timeout=15)
+                    if not status.get("recording"):
+                        raise RuntimeError("记录启动失败：" + str(status.get("error", "")))
+                    result = ApiResult("imu_record", True, status)
+            except (RuntimeError, OSError, ValueError, HTTPException) as exc:
+                result = ApiResult("imu_record", False, error=str(exc))
+            self.results.put(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def poll_status(self) -> None:
         if self.closing:
             return
         self._request_async("status", "/api/v1/status")
+        if self.record_url is not None and not self.record_busy:
+            self._request_async("imu_log_status", "/api/v1/imu/log/status")
         self.after(STATUS_POLL_MS, self.poll_status)
 
     def _request_async(
@@ -830,6 +969,43 @@ class RobotControllerApp(tk.Tk):
             self.after(100, self._drain_results)
 
     def _handle_result(self, result: ApiResult) -> None:
+        if result.operation == "imu_log_status":
+            if result.ok and not self.record_busy and self.record_url is not None:
+                status = result.payload or {}
+                if not status.get("recording"):
+                    self.record_text.set("结束 / 下载 IMU 日志")
+                    self.record_status.set("设备已结束记录：" + str(status.get("error") or "已封存"))
+            return
+        if result.operation == "scan":
+            self.scan_button.configure(state="normal")
+            url = (result.payload or {}).get("url")
+            if url and self.record_url is None and not self.drive_direction and not self.direct_active:
+                self.url_var.set(url)
+                self.apply_url_and_refresh()
+            else:
+                self._log("扫描完成，未切换设备：" + (result.error or "未找到设备或当前正在操作"))
+            return
+        if result.operation == "imu_record":
+            self.record_busy = False
+            self.record_button.configure(state="normal")
+            self.download_button.configure(state="normal")
+            if not result.ok:
+                # A timed-out POST may have succeeded. Keep the device bound and offer an idempotent stop.
+                self.recording = True
+                self.record_text.set("结束记录 / 重试下载")
+                self.record_status.set("操作未完成，可点击结束 / 重试下载")
+                self._log("IMU 记录：" + result.error)
+                return
+            payload = result.payload or {}
+            self.recording = bool(payload.get("recording"))
+            self.record_text.set("结束记录 IMU" if self.recording else "开始记录 IMU")
+            if self.recording:
+                self.record_status.set("正在记录：" + str(payload.get("file", "")))
+            else:
+                self.record_url = None
+                self.record_status.set("已下载并设置只读：" + str(payload.get("saved", "")))
+            self._log("IMU 记录：" + json.dumps(payload, ensure_ascii=False))
+            return
         if not result.ok:
             self.connection_var.set("● 未连接")
             self.connection_label.configure(style="Offline.TLabel")
@@ -912,6 +1088,12 @@ class RobotControllerApp(tk.Tk):
         self.log_text.see(tk.END)
 
     def on_close(self) -> None:
+        if self.record_busy:
+            self._log("日志正在传输，请稍候再关闭窗口。")
+            return
+        if self.record_url is not None:
+            if not messagebox.askyesno("记录尚未完成", "日志尚未确认下载。关闭窗口后，设备可能继续记录至容量上限。仍然关闭？", parent=self):
+                return
         if self.closing:
             return
         self.drive_direction = 0

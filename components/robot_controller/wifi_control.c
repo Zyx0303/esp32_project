@@ -1,3 +1,4 @@
+#include "imu_log.h"
 #include "wifi_control.h"
 
 #include <inttypes.h>
@@ -496,7 +497,7 @@ static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 24;
     ESP_RETURN_ON_ERROR(httpd_start(&s_http_server, &config), TAG, "start HTTP server");
 
     const httpd_uri_t handlers[] = {
@@ -526,7 +527,7 @@ static esp_err_t start_http_server(void)
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_http_server, &handlers[i]),
                             TAG, "register HTTP handler");
     }
-    return ESP_OK;
+    return imu_log_register_http(s_http_server);
 }
 
 esp_err_t wifi_control_init(wifi_command_submit_cb_t submit_cb,

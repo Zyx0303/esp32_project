@@ -21,12 +21,12 @@ static const char *TAG = "mpu6050";
 static esp_err_t mpu_write_u8(mpu6050_t *imu, uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(imu->dev, buf, sizeof(buf), -1);
+    return i2c_master_transmit(imu->dev, buf, sizeof(buf), 50);
 }
 
 static esp_err_t mpu_read(mpu6050_t *imu, uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_transmit_receive(imu->dev, &reg, 1, data, len, -1);
+    return i2c_master_transmit_receive(imu->dev, &reg, 1, data, len, 50);
 }
 
 esp_err_t mpu6050_init(mpu6050_t *imu, i2c_master_bus_handle_t bus, uint8_t i2c_addr)
@@ -45,11 +45,13 @@ esp_err_t mpu6050_init(mpu6050_t *imu, i2c_master_bus_handle_t bus, uint8_t i2c_
     ESP_RETURN_ON_ERROR(mpu_read(imu, REG_WHO_AM_I, &who, 1), TAG, "whoami");
     ESP_LOGI(TAG, "WHO_AM_I=0x%02x", who);
 
+    if (who != 0x68) return ESP_ERR_NOT_FOUND;
+
     // Wake up (clear sleep bit), use internal 8MHz oscillator (CLKSEL=0)
     ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_PWR_MGMT_1, 0x00), TAG, "pwr");
 
     // Basic config: ~1kHz internal sample, set filters modestly
-    ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_SMPLRT_DIV, 0x07), TAG, "smplrt"); // 1kHz/(1+7)=125Hz if DLPF on
+    ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_SMPLRT_DIV, 0x09), TAG, "smplrt"); // 1kHz/(1+9)=100Hz if DLPF on
     ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_CONFIG, 0x03), TAG, "dlpf");      // DLPF_CFG=3
     ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_GYRO_CONFIG, 0x00), TAG, "gyro"); // ±250 dps
     ESP_RETURN_ON_ERROR(mpu_write_u8(imu, REG_ACCEL_CONFIG, 0x00), TAG, "acc"); // ±2g

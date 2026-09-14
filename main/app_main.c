@@ -18,6 +18,7 @@
 #include "app_console.h"
 #include "app_control.h"
 #include "app_imu.h"
+#include "imu_log.h"
 #include "app_status.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -81,6 +82,8 @@ void app_main(void)
      * 阶段 5：启动 IMU 采样。I2C 或器件不可用属于可诊断降级；
      * 但传感器已经就绪却无法创建任务，说明系统内存不足，必须终止启动。
      */
+    const esp_err_t log_err = imu_log_init();
+    if (log_err != ESP_OK) ESP_LOGW(TAG, "IMU logging unavailable: %s", esp_err_to_name(log_err));
     const esp_err_t imu_err = app_imu_start();
     if (imu_err == ESP_ERR_NO_MEM) {
         ESP_ERROR_CHECK(imu_err);

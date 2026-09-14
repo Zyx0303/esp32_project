@@ -10,6 +10,8 @@
 #include "esp_timer.h"
 
 #include "app_status.h"
+#include "imu_log.h"
+#include "driver/gpio.h"
 #include "board_pins.h"
 #include "mpu6050.h"
 #include "robot_types.h"
@@ -18,6 +20,15 @@ static const char *TAG = "app_imu";
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static mpu6050_t s_imu;
+static TaskHandle_t s_sensor_task;
+
+static void imu_ready_isr(void *argument)
+{
+    (void)argument;
+    BaseType_t wake = pdFALSE;
+    vTaskNotifyGiveFromISR(s_sensor_task, &wake);
+    if (wake) portYIELD_FROM_ISR();
+}
 
 /**
  * 创建 MPU6050 使用的 I2C 主总线。
@@ -41,20 +52,22 @@ static esp_err_t init_i2c_bus(void)
 /**
  * IMU 的唯一 I2C 访问者。
  *
- * 采样完成后只把结果写入共享状态快照；HTTP 和串口读取快照，不会与本任务争用总线。
+ * DATA_READY 通知后采样，更新共享快照并非阻塞地入日志队列。
+ * HTTP 和串口读取快照，不会与本任务争用总线。
  * 读取失败时保留历史计数，同时把 imu_valid 清零，避免上位机误用旧数据。
  */
 static void sensor_task(void *argument)
 {
     (void)argument;
-    TickType_t last_wake = xTaskGetTickCount();
-
+    uint32_t sequence = 0;
     while (true) {
-        mpu6050_raw_t sample;
-        const esp_err_t err = mpu6050_read_raw(&s_imu, &sample);
-        const int64_t sample_time_us = esp_timer_get_time();
+        uint32_t ready = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        int64_t sample_time_us = esp_timer_get_time();
+        mpu6050_raw_t sample = {0};
+        esp_err_t err = ready ? mpu6050_read_raw(&s_imu, &sample) : ESP_ERR_TIMEOUT;
+        sequence += ready ? ready : 1;
         app_status_record_imu(err == ESP_OK ? &sample : NULL, sample_time_us);
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
+        imu_log_record(&sample, sample_time_us, sequence, ready, err);
     }
 }
 
@@ -70,9 +83,27 @@ esp_err_t app_imu_start(void)
         return err;
     }
 
+    gpio_config_t interrupt_config = {
+        .pin_bit_mask = 1ULL << PIN_MPU_INT,
+        .mode = GPIO_MODE_INPUT,
+        .intr_type = GPIO_INTR_POSEDGE,
+    };
+    err = gpio_config(&interrupt_config);
+    if (err != ESP_OK) return err;
+    err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+
     const BaseType_t created = xTaskCreatePinnedToCore(
-        sensor_task, "sensor_task", 4096, NULL, 5, NULL, 0);
-    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+        sensor_task, "sensor_task", 4096, NULL, 5, &s_sensor_task, 0);
+    if (created != pdPASS) return ESP_ERR_NO_MEM;
+    err = gpio_isr_handler_add(PIN_MPU_INT, imu_ready_isr, NULL);
+    if (err == ESP_OK) err = mpu6050_config_data_ready_int(&s_imu, false);
+    if (err != ESP_OK) {
+        gpio_isr_handler_remove(PIN_MPU_INT);
+        vTaskDelete(s_sensor_task);
+        s_sensor_task = NULL;
+    }
+    return err;
 }
 
 void app_imu_log_latest(void)
