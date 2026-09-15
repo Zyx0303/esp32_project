@@ -10,6 +10,11 @@ http://192.168.4.1 and can also be supplied with ``--url``.
 
 from __future__ import annotations
 
+# Select a CJK-capable Tk before importing tkinter (some Python environments lack it).
+if __name__ == "__main__":
+    from gui_runtime import activate_local_tk
+    activate_local_tk()
+
 import argparse
 from http.client import HTTPException
 import json
@@ -37,11 +42,11 @@ MAX_PARALLEL_REQUESTS = 2
 MAX_LOG_LINES = 300
 
 COLORS = {
-    "canvas": "#F4F7FB",
-    "card": "#FFFFFF",
-    "ink": "#172033",
-    "muted": "#64748B",
-    "line": "#DDE5F0",
+    "canvas": "#E7F3FB",
+    "card": "#F8FCFF",
+    "ink": "#163753",
+    "muted": "#52748F",
+    "line": "#BDD9EC",
     "navy": "#0F172A",
     "navy_soft": "#1E293B",
     "blue": "#2563EB",
@@ -52,7 +57,8 @@ COLORS = {
     "red_hover": "#B42332",
     "amber": "#D97706",
     "amber_hover": "#B45309",
-    "soft_blue": "#E8F0FE",
+    "sky": "#D5EAF8",
+    "soft_blue": "#DCEFFA",
     "soft_green": "#E6F6EF",
     "soft_red": "#FDECEE",
 }
@@ -317,8 +323,8 @@ class RobotControllerApp(tk.Tk):
         super().__init__()
         self.ui_font = configure_chinese_fonts(self)
         self.title("ESP32-S3 机器人控制器")
-        self.geometry("1180x820")
-        self.minsize(1040, 700)
+        self.geometry(f"{min(2200, self.winfo_screenwidth() - 80)}x{min(1250, self.winfo_screenheight() - 100)}")
+        self.minsize(1700, 950)
         self.configure(background=COLORS["canvas"])
 
         self.api = RobotApi(base_url)
@@ -360,6 +366,11 @@ class RobotControllerApp(tk.Tk):
 
         self._configure_style()
         self._build_ui()
+        self.update_idletasks()
+        # Fit the watermark-and-workspace layout to the available desktop.
+        layout_width = min(self.winfo_screenwidth() - 80, max(1700, self.winfo_reqwidth()))
+        layout_height = min(self.winfo_screenheight() - 100, max(950, self.winfo_reqheight()))
+        self.geometry(f"{layout_width}x{layout_height}")
         self.bind("<F1>", lambda _event: self.show_help())
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._drain_results)
@@ -431,15 +442,15 @@ class RobotControllerApp(tk.Tk):
         )
         style.map("Secondary.TButton", background=[("active", "#E2E8F0")])
         style.configure(
-            "Header.TButton", background=COLORS["navy_soft"], foreground="#E2E8F0",
-            bordercolor="#334155", padding=(13, 7), font=(self.ui_font, 10, "bold"),
+            "Header.TButton", background=COLORS["soft_blue"], foreground=COLORS["ink"],
+            bordercolor=COLORS["line"], padding=(13, 7), font=(self.ui_font, 10, "bold"),
         )
-        style.map("Header.TButton", background=[("active", "#334155")])
+        style.map("Header.TButton", background=[("active", "#BDDDF2")])
         style.configure("TEntry", padding=8, fieldbackground="white", bordercolor=COLORS["line"])
         style.configure("TScale", background=COLORS["card"], troughcolor="#DFE7F2")
         style.configure("TNotebook", background=COLORS["canvas"], borderwidth=0)
         style.configure(
-            "TNotebook.Tab", background="#E8EDF5", foreground=COLORS["muted"],
+            "TNotebook.Tab", background=COLORS["sky"], foreground=COLORS["muted"],
             padding=(22, 10), font=(self.ui_font, 10, "bold"),
         )
         style.map(
@@ -452,33 +463,75 @@ class RobotControllerApp(tk.Tk):
         self.tooltips.append(ToolTip(widget, message))
 
     def _build_ui(self) -> None:
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        header = tk.Frame(self, background=COLORS["navy"], padx=22, pady=16)
+        # The crest is part of the page background rather than a separate poster card.
+        rail = tk.Frame(self, background=COLORS["canvas"], padx=18, pady=18)
+        rail.grid(row=0, column=0, sticky="nsew", padx=(18, 0), pady=18)
+        rail.columnconfigure(0, weight=1)
+        rail.rowconfigure(0, weight=1)
+
+        workspace = ttk.Frame(self, style="App.TFrame")
+        workspace.grid(row=0, column=1, sticky="nsew", padx=18, pady=18)
+        workspace.columnconfigure(0, weight=1)
+        workspace.rowconfigure(2, weight=1)
+        header = tk.Frame(workspace, background=COLORS["sky"], padx=24, pady=20)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        tk.Label(
-            header, text="ROBOT CONTROL", background=COLORS["navy"], foreground="#60A5FA",
-            font=(self.ui_font, 9, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header, text="ESP32-S3 机器人控制台", background=COLORS["navy"], foreground="white",
-            font=(self.ui_font, 21, "bold"),
-        ).grid(row=1, column=0, sticky="w")
-        tk.Label(
-            header, text="实时状态 · 安全控制 · 硬件板测", background=COLORS["navy"],
-            foreground="#94A3B8", font=(self.ui_font, 10),
-        ).grid(row=2, column=0, sticky="w", pady=(3, 0))
-        tk.Label(
-            header, text="局域网 HTTP", background=COLORS["navy_soft"], foreground="#BFDBFE",
-            padx=12, pady=6, font=(self.ui_font, 9, "bold"),
-        ).grid(row=1, column=1, padx=(12, 14))
+
+        # Render a 640 x 640 watermark. White pixels become the page background;
+        # the blue ink is softly blended into it, which gives PhotoImage an
+        # alpha-like appearance without adding a Pillow dependency.
+        logo_path = Path(__file__).resolve().parent / "assets" / "fudan_logo.png"
+        original_logo = tk.PhotoImage(master=self, file=str(logo_path))
+        logo_size = 640
+        self.fudan_logo = tk.PhotoImage(master=self, width=logo_size, height=logo_size)
+        background_rgb = tuple(int(COLORS["canvas"][i:i + 2], 16) for i in (1, 3, 5))
+        watermark_rgb = (72, 137, 181)
+        background_hex = "#%02x%02x%02x" % background_rgb
+        self.fudan_logo.put(background_hex, to=(0, 0, logo_size, logo_size))
+        ratio = logo_size / max(original_logo.width(), original_logo.height())
+        width = round(original_logo.width() * ratio)
+        height = round(original_logo.height() * ratio)
+        left, top_offset = (logo_size - width) // 2, (logo_size - height) // 2
+        source_x = [min(original_logo.width() - 1, int((x + 0.5) / ratio)) for x in range(width)]
+        for y in range(height):
+            source_y = min(original_logo.height() - 1, int((y + 0.5) / ratio))
+            colors = []
+            for x in source_x:
+                red, green, blue = original_logo.get(x, source_y)
+                ink = max(0.0, min(1.0, 1.0 - (red + green + blue) / (3 * 255)))
+                strength = ink * 0.34
+                blended = tuple(round(bg * (1.0 - strength) + mark * strength)
+                                for bg, mark in zip(background_rgb, watermark_rgb))
+                colors.append("#%02x%02x%02x" % blended)
+            row = " ".join(colors)
+            self.fudan_logo.put("{" + row + "}", to=(left, top_offset + y))
+        tk.Label(rail, image=self.fudan_logo, background=COLORS["canvas"],
+                 borderwidth=0).grid(row=0, column=0, sticky="n", pady=(44, 0))
+
+        brand = tk.Frame(header, background=COLORS["sky"])
+        brand.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(24, 0))
+        tk.Label(brand, text="BSRL", background=COLORS["sky"], foreground="#155283",
+                 font=(self.ui_font, 46, "bold")).pack(anchor="e")
+        tk.Label(brand, text="仿生结构与机器人实验室", background=COLORS["sky"],
+                 foreground=COLORS["ink"], font=(self.ui_font, 18)).pack(anchor="e")
+
+        # Keep the title beside the laboratory identity; the crest has its own rail.
+        title = tk.Frame(header, background=COLORS["sky"])
+        title.grid(row=0, column=0, sticky="nw", pady=(12, 0))
+        title.columnconfigure(0, weight=1)
+        tk.Label(title, text="机器人实验控制台", background=COLORS["sky"],
+                 foreground=COLORS["ink"], font=(self.ui_font, 22, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(title, text="ESP32-S3  /  CONTROL & ACQUISITION",
+                 background=COLORS["sky"], foreground=COLORS["muted"],
+                 font=(self.ui_font, 10)).grid(row=1, column=0, sticky="w", pady=(3, 0))
         help_button = ttk.Button(header, text="帮助  F1", style="Header.TButton", command=self.show_help)
-        help_button.grid(row=1, column=2, sticky="e")
+        help_button.grid(row=1, column=0, sticky="sw", pady=(18, 0))
         self._tip(help_button, "查看所有按钮的用途、操作理由和安全注意事项。")
 
-        top = ttk.Frame(self, style="App.TFrame", padding=(18, 14, 18, 8))
+        top = ttk.Frame(workspace, style="App.TFrame", padding=(0, 18, 0, 10))
         top.grid(row=1, column=0, sticky="ew")
         top.columnconfigure((0, 1), weight=1, uniform="top")
 
@@ -533,8 +586,8 @@ class RobotControllerApp(tk.Tk):
         self._tip(estop_button, "异常时立即进入紧急停止；排除原因后才能清除。")
         self._tip(clear_button, "仅清除已排除原因的可恢复故障，不会自动解锁。")
 
-        notebook = ttk.Notebook(self)
-        notebook.grid(row=2, column=0, sticky="nsew", padx=18, pady=(4, 18))
+        notebook = ttk.Notebook(workspace)
+        notebook.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
 
         controls = ttk.Frame(notebook, style="App.TFrame", padding=(0, 12, 0, 0))
         diagnostics_page = ttk.Frame(notebook, style="App.TFrame", padding=(0, 12, 0, 0))

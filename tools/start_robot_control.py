@@ -12,6 +12,11 @@
 
 from __future__ import annotations
 
+# Select a CJK-capable Tk before importing tkinter (some Python environments lack it).
+if __name__ == "__main__":
+    from gui_runtime import activate_local_tk
+    activate_local_tk()
+
 import argparse
 import ipaddress
 import json
