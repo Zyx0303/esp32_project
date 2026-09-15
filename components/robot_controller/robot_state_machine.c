@@ -1,5 +1,7 @@
 #include "robot_state_machine.h"
 
+#include <stddef.h>
+
 void robot_state_machine_init(robot_state_machine_t *machine)
 {
     if (machine == NULL) {
