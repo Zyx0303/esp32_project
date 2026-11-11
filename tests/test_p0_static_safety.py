@@ -109,7 +109,9 @@ class P0StaticSafetyTests(unittest.TestCase):
         actuators = source("main/app_actuators.c")
         power = source("components/robot_controller/power_control.c")
         init = function_body(actuators, "app_actuators_init_safe_power")
-        self.assertRegex(init, r"power_control_(?:set_asserted|init)[\s\S]*?false")
+        self.assertRegex(init, r"power_control_init\s*\([^;]*PIN_RELEASE_EN\)")
+        self.assertRegex(init, r"power_control_init\s*\([^;]*PIN_SOL_PWR_EN\)")
+        self.assertIn("PIN_SOL_PG", init)
         self.assertRegex(power, r"gpio_set_level\s*\([^;]*\b0\s*\)")
 
     def test_config_has_version_validation_and_safe_fallback(self) -> None:

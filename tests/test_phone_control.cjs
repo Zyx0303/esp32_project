@@ -26,7 +26,7 @@ class Target {
   setPointerCapture(id) { this.capture = id; }
 }
 async function flush() { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); }
-function harness() {
+function harness({log = {}, storageUnavailable = false} = {}) {
   const nodes = Object.fromEntries([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Target()]));
   Object.assign(nodes.speed, {value: '10'}); Object.assign(nodes.angle, {value: '90'});
   nodes.leftMotor.value = nodes.rightMotor.value = '0';
@@ -39,17 +39,36 @@ function harness() {
   document.hidden = false;
   document.getElementById = id => nodes[id];
   document.querySelectorAll = selector => selector === '.hold' ? holds : actuators;
-  const calls = [], intervals = [], timeouts = new Map();
+  const calls = [], intervals = [], timeouts = new Map(), saved = [];
+  const logState = {ok: true, recording: false, sealed: false, file: '', dropped: 0, error: '', ...log};
+  document.body = {appendChild() {}};
+  document.createElement = () => ({
+    click() { saved.push(this.download); },
+    remove() {}
+  });
   let now = 10000, timerId = 0, override = null;
   const status = {
     ok: true, armed: false, state: 'SAFE', faults: 0, drv8833_fault: false,
     motor_a: {output: 0}, motor_b: {output: 0}, imu: {valid: true}, power: false
   };
+  const json = payload => ({ok: true, status: 200, json: async () => structuredClone(payload)});
   const fetch = async (url, options) => {
     const call = {url, options, body: options.body ? JSON.parse(options.body) : undefined};
     calls.push(call);
     const intercepted = override && override(call);
     if (intercepted) return intercepted;
+    if (url.startsWith('/api/v1/imu/log/')) {
+      if (storageUnavailable) {
+        return {ok: false, status: 500, headers: new Headers({'Content-Type': 'text/plain'}),
+          text: async () => 'IMU storage unavailable'};
+      }
+      if (url.endsWith('/start')) Object.assign(logState, {recording: true, sealed: false, file: 'I000001.log'});
+      if (url.endsWith('/stop')) Object.assign(logState, {recording: false, sealed: true});
+      if (url.includes('/download?')) {
+        return {ok: true, headers: new Headers({'X-Log-Size': '6'}), blob: async () => new Blob(['sample'])};
+      }
+      return json(logState);
+    }
     if (url === '/api/v1/arm') { status.armed = true; status.state = 'READY'; }
     if (url === '/api/v1/disarm' || url === '/api/v1/fault/clear') { status.armed = false; status.state = 'SAFE'; }
     if (url === '/api/v1/estop') { status.armed = false; status.state = 'ESTOP'; }
@@ -57,14 +76,14 @@ function harness() {
   };
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({
-    document, window, location: {host: '192.168.4.1'}, fetch, AbortController, Date: Clock,
+    document, window, location: {host: '192.168.4.1'}, fetch, AbortController, URL, Date: Clock,
     setInterval(fn, ms) { intervals.push({fn, ms}); },
     setTimeout(fn, ms) { timeouts.set(++timerId, {fn, ms}); return timerId; },
     clearTimeout(id) { timeouts.delete(id); }
   });
   vm.runInContext(script, context, {filename: 'control.html'});
   return {
-    nodes, directions, document, window, calls, status,
+    nodes, directions, document, window, calls, status, saved,
     async arm() { nodes.arm.onclick(); await flush(); assert.equal(nodes.direct.disabled, false); },
     async tick(ms = 200) { now += ms; intervals.find(timer => timer.ms === ms).fn(); await flush(); },
     async poll() { intervals.find(timer => timer.ms === 500).fn(); await flush(); },
@@ -85,7 +104,7 @@ function deferredResponse() {
 
 test('load only reads status; locked controls cannot emit motion', async () => {
   const h = harness(); await flush();
-  assert.deepEqual(h.calls.map(call => call.url), ['/api/v1/status']);
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/v1/status', '/api/v1/imu/log/status']);
   assert.equal(h.nodes.direct.disabled, true);
   h.directions[0].emit('pointerdown'); await h.tick();
   assert.equal(h.motors().length, 0);
@@ -222,9 +241,17 @@ test('stale status from before ARM cannot undo a confirmed unlock', async () => 
   pending.resolve({ok: true, json: async () => ({...structuredClone(h.status), armed: false, state: 'SAFE'})}); await flush();
   assert.equal(h.nodes.direct.disabled, false);
 });
-test('servo and GPIO use explicit validated payloads without automatic replay', async () => {
+test('servo and solenoid use explicit validated payloads without automatic replay', async () => {
   const h = harness(); await flush(); await h.arm();
   h.nodes.angle.value = '45'; h.nodes.servo.onclick(); await flush();
+  assert.equal(h.nodes.powerOn.disabled, true);
+  h.nodes.powerOn.onclick(); await flush();
+  assert(!h.calls.some(call => call.url.endsWith('/power')));
+  h.status.sol_actuation_enabled = true;
+  h.status.sol_power_good = true;
+  await h.poll();
+  assert.equal(h.nodes.powerOn.disabled, false);
+  assert.match(h.nodes.power.textContent, /电源就绪.*线圈断电/);
   h.nodes.powerOn.onclick(); await flush(); h.nodes.powerOff.onclick(); await flush();
   assert.deepEqual(h.calls.filter(call => call.url.endsWith('/servo')).map(call => call.body), [{angle: 45}]);
   assert.deepEqual(h.calls.filter(call => call.url.endsWith('/power')).map(call => call.body), [{asserted: true}, {asserted: false}]);
@@ -255,4 +282,58 @@ test('an offline event locks even when telemetry still reports armed after recon
   assert.equal(h.nodes.direct.disabled, true);
   h.directions[0].emit('pointerdown'); await h.tick();
   assert.equal(h.motors().length, 0);
+});
+
+test('IMU telemetry and recording remain available while the robot is locked', async () => {
+  const h = harness(); await flush();
+  Object.assign(h.status.imu, {accel: [1, 2, 3], gyro: [-1, -2, -3], temp_raw: 17, samples: 99, errors: 1});
+  await h.poll();
+  assert.equal(h.nodes.accel.textContent, '1 / 2 / 3');
+  assert.equal(h.nodes.gyro.textContent, '-1 / -2 / -3');
+  assert.equal(h.nodes.imuTemp.textContent, 17);
+  assert.equal(h.nodes.imuCounts.textContent, '99 / 1');
+  assert.equal(h.nodes.logStart.disabled, false);
+  h.nodes.logStart.onclick(); await flush();
+  assert.equal(h.nodes.logStop.disabled, false);
+  assert.equal(h.nodes.logDownload.disabled, true);
+  h.nodes.logStop.onclick(); await flush();
+  assert.equal(h.nodes.logDownload.disabled, false);
+  assert.match(h.nodes.logStatus.textContent, /已封存 I000001.log/);
+  assert(!h.calls.some(call => call.url.endsWith('/arm')));
+});
+
+test('reloading recovers active recording from the board', async () => {
+  const h = harness({log: {recording: true, file: 'I000021.log', dropped: 3}});
+  await flush();
+  assert.match(h.nodes.logStatus.textContent, /正在录制 I000021.log.*3/);
+  assert.equal(h.nodes.logStart.disabled, true);
+  assert.equal(h.nodes.logStop.disabled, false);
+});
+
+test('incomplete download can retry and does not block ESTOP', async () => {
+  const h = harness({log: {sealed: true, file: 'I000001.log'}});
+  await flush();
+  const pending = deferredResponse();
+  h.override(call => call.url.includes('/download?') ? pending.promise : null);
+  h.nodes.logDownload.onclick(); await flush();
+  h.nodes.estop.onclick(); await flush();
+  assert(h.calls.some(call => call.url.endsWith('/estop')));
+  pending.resolve({ok: true, headers: new Headers({'X-Log-Size': '8'}),
+    blob: async () => new Blob(['sample'])});
+  await flush();
+  assert.match(h.nodes.logStatus.textContent, /下载失败.*传输不完整/);
+  assert.equal(h.nodes.logDownload.disabled, false);
+  assert.deepEqual(h.saved, []);
+  h.override(null);
+  h.nodes.logDownload.onclick(); await flush();
+  assert.deepEqual(h.saved, ['I000001.log']);
+});
+
+test('unavailable IMU storage leaves robot controls and telemetry usable', async () => {
+  const h = harness({storageUnavailable: true}); await flush();
+  assert.match(h.nodes.logStatus.textContent, /IMU storage unavailable/);
+  assert.equal(h.nodes.logStart.disabled, true);
+  assert.equal(h.nodes.logDownload.disabled, true);
+  assert.equal(h.nodes.imu.textContent, '采样中');
+  await h.arm();
 });

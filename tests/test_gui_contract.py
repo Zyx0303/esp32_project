@@ -66,8 +66,8 @@ class GuiContractTests(unittest.TestCase):
             "Motor A / Motor B 滑块",
             "开始独立输出",
             "双电机归零",
-            "GPIO35 置位",
-            "GPIO35 释放",
+            "推拉杆伸出",
+            "推拉杆断电",
             "IMU 状态",
         ):
             with self.subTest(label=label):

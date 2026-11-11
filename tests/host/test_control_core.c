@@ -14,13 +14,35 @@ typedef struct {
     int motor_a;
     int motor_b;
     int servo_angle;
+    bool supply_on;
+    bool power_good;
+    bool coil_on;
 } fake_actuators_t;
 
 static esp_err_t fake_sleep(void *ctx, bool sleep) { ((fake_actuators_t *)ctx)->motor_sleep = sleep; return ESP_OK; }
 static esp_err_t fake_motors(void *ctx, int16_t a, int16_t b) { fake_actuators_t *f = ctx; f->motor_a = a; f->motor_b = b; return ESP_OK; }
 static esp_err_t fake_servo(void *ctx, int16_t angle) { fake_actuators_t *f = ctx; f->servo_angle = angle; f->servo_disabled = false; return ESP_OK; }
 static esp_err_t fake_disable_servo(void *ctx) { ((fake_actuators_t *)ctx)->servo_disabled = true; return ESP_OK; }
-static esp_err_t fake_power(void *ctx, bool asserted) { (void)ctx; (void)asserted; return ESP_OK; }
+static esp_err_t fake_coil(void *ctx, bool enabled)
+{
+    fake_actuators_t *fake = ctx;
+    CHECK(!enabled || (fake->supply_on && fake->power_good));
+    fake->coil_on = enabled;
+    return ESP_OK;
+}
+
+static esp_err_t fake_supply(void *ctx, bool enabled)
+{
+    fake_actuators_t *fake = ctx;
+    CHECK(!fake->coil_on);
+    fake->supply_on = enabled;
+    return ESP_OK;
+}
+
+static bool fake_power_good(void *ctx)
+{
+    return ((fake_actuators_t *)ctx)->power_good;
+}
 
 static control_manager_t make_manager(fake_actuators_t *fake, robot_control_config_t config)
 {
@@ -28,7 +50,9 @@ static control_manager_t make_manager(fake_actuators_t *fake, robot_control_conf
     const robot_actuator_ops_t ops = {
         .set_motor_sleep = fake_sleep, .set_motors = fake_motors,
         .set_servo = fake_servo, .disable_servo = fake_disable_servo,
-        .set_power_asserted = fake_power,
+        .set_coil_enabled = fake_coil,
+        .set_sol_supply_enabled = fake_supply,
+        .read_sol_power_good = fake_power_good,
     };
     memset(fake, 0, sizeof(*fake));
     CHECK(control_manager_init(&manager, &config, &ops, fake) == ESP_OK);
@@ -105,10 +129,12 @@ static void test_expiry_sequence_and_estop_priority(void)
     arm(&manager, 10, 1000000);
     robot_command_t drive = command(ROBOT_CMD_DRIVE, 11, 1000000);
     drive.value.drive.throttle = 20;
-    CHECK(control_manager_submit(&manager, &drive, 2100000) == ROBOT_COMMAND_EXPIRED);
-    drive.received_at_us = 2200000;
-    CHECK(control_manager_submit(&manager, &drive, 2200000) == ROBOT_COMMAND_ACCEPTED);
-    CHECK(control_manager_submit(&manager, &drive, 2200000) == ROBOT_COMMAND_OUT_OF_ORDER);
+    const int64_t expired_at_us = drive.received_at_us +
+                                  manager.config.command_max_age_ms * 1000LL + 1;
+    CHECK(control_manager_submit(&manager, &drive, expired_at_us) == ROBOT_COMMAND_EXPIRED);
+    drive.received_at_us = expired_at_us + 1000;
+    CHECK(control_manager_submit(&manager, &drive, drive.received_at_us) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(control_manager_submit(&manager, &drive, drive.received_at_us) == ROBOT_COMMAND_OUT_OF_ORDER);
     robot_command_t estop = command(ROBOT_CMD_ESTOP, 1, 0);
     CHECK(control_manager_submit(&manager, &estop, 9000000) == ROBOT_COMMAND_ACCEPTED);
     CHECK(manager.state_machine.state == ROBOT_STATE_ESTOP);
@@ -176,6 +202,103 @@ static void test_servo_range_slew_and_disable(void)
     CHECK(fake.servo_disabled);
 }
 
+static robot_command_result_t submit_power(control_manager_t *manager,
+                                            uint32_t sequence, int64_t now_us,
+                                            bool asserted, bool diagnostic)
+{
+    robot_command_t request = command(ROBOT_CMD_POWER_CONTROL, sequence, now_us);
+    request.source = diagnostic ? ROBOT_COMMAND_SOURCE_SERIAL : ROBOT_COMMAND_SOURCE_WIFI;
+    request.value.power.asserted = asserted;
+    request.value.power.diagnose_supply = diagnostic;
+    return control_manager_submit(manager, &request, now_us);
+}
+
+static void test_solenoid_pulse_and_cooldown(void)
+{
+    fake_actuators_t fake;
+    robot_control_config_t config = control_manager_default_config();
+    control_manager_t manager = make_manager(&fake, config);
+    CHECK(submit_power(&manager, 1, 1000, true, false) == ROBOT_COMMAND_INVALID_STATE);
+    CHECK(!fake.supply_on && !fake.coil_on);
+
+    robot_actuator_ops_t ops = manager.actuator_ops;
+    ops.sol_pulse_ms = 50;
+    ops.sol_cooldown_ms = 100;
+    CHECK(control_manager_init(&manager, &config, &ops, &fake) == ESP_OK);
+    CHECK(control_manager_boot_complete(&manager) == ESP_OK);
+    CHECK(submit_power(&manager, 1, 1000, true, false) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(fake.supply_on && !fake.coil_on);
+    CHECK(control_manager_tick(&manager, 10000) == ESP_OK);
+    CHECK(!fake.coil_on);
+
+    fake.power_good = true;
+    CHECK(control_manager_tick(&manager, 20000) == ESP_OK);
+    CHECK(fake.coil_on && manager.status.power_asserted && manager.status.sol_power_good);
+    CHECK(submit_power(&manager, 2, 60000, true, false) == ROBOT_COMMAND_INVALID_STATE);
+    CHECK(control_manager_tick(&manager, 70000) == ESP_OK);
+    CHECK(!fake.supply_on && !fake.coil_on && !manager.status.power_asserted);
+    CHECK(control_manager_tick(&manager, 80000) == ESP_OK);
+    CHECK(submit_power(&manager, 3, 179000, true, false) == ROBOT_COMMAND_INVALID_STATE);
+    CHECK(submit_power(&manager, 4, 180000, true, false) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(control_manager_tick(&manager, 190000) == ESP_OK);
+    fake.power_good = false;
+    CHECK(control_manager_tick(&manager, 200000) == ESP_OK);
+    CHECK(manager.status.faults & ROBOT_FAULT_SOL_PG);
+    CHECK(!fake.supply_on && !fake.coil_on);
+}
+
+static void test_solenoid_diagnostics_and_safety_stop(void)
+{
+    fake_actuators_t fake;
+    robot_control_config_t config = control_manager_default_config();
+    control_manager_t manager = make_manager(&fake, config);
+    CHECK(submit_power(&manager, 1, 1000, true, true) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(control_manager_tick(&manager, 251000) == ESP_OK);
+    CHECK(manager.status.faults & ROBOT_FAULT_SOL_PG);
+    CHECK(!fake.supply_on && !fake.coil_on);
+
+    manager = make_manager(&fake, config);
+    CHECK(submit_power(&manager, 1, 1000, true, true) == ROBOT_COMMAND_ACCEPTED);
+    fake.power_good = true;
+    CHECK(control_manager_tick(&manager, 10000) == ESP_OK);
+    CHECK(fake.supply_on && !fake.coil_on);
+    CHECK(control_manager_tick(&manager, 10010000) == ESP_OK);
+    CHECK(!fake.supply_on && !fake.coil_on);
+
+    manager = make_manager(&fake, config);
+    CHECK(submit_power(&manager, 1, 1000, true, true) == ROBOT_COMMAND_ACCEPTED);
+    robot_command_t estop = command(ROBOT_CMD_ESTOP, 2, 2000);
+    CHECK(control_manager_submit(&manager, &estop, 2000) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(!fake.supply_on && !fake.coil_on);
+}
+
+static void test_solenoid_control_timeout(void)
+{
+    fake_actuators_t fake;
+    robot_control_config_t config = control_manager_default_config();
+    config.command_timeout_ms = 100;
+    control_manager_t manager = make_manager(&fake, config);
+    robot_actuator_ops_t ops = manager.actuator_ops;
+    ops.sol_pulse_ms = 200;
+    ops.sol_cooldown_ms = 100;
+    CHECK(control_manager_init(&manager, &config, &ops, &fake) == ESP_OK);
+    CHECK(control_manager_boot_complete(&manager) == ESP_OK);
+    CHECK(submit_power(&manager, 1, 1000, true, false) == ROBOT_COMMAND_ACCEPTED);
+    fake.power_good = true;
+    CHECK(control_manager_tick(&manager, 10000) == ESP_OK);
+    CHECK(fake.coil_on);
+    CHECK(control_manager_tick(&manager, 101000) == ESP_OK);
+    CHECK(!fake.supply_on && !fake.coil_on);
+
+    CHECK(control_manager_tick(&manager, 110000) == ESP_OK);
+    robot_command_t disarm = command(ROBOT_CMD_DISARM, 3, 250000);
+    CHECK(control_manager_submit(&manager, &disarm, 250000) == ROBOT_COMMAND_ACCEPTED);
+    robot_command_t queued_start = command(ROBOT_CMD_POWER_CONTROL, 2, 249000);
+    queued_start.value.power.asserted = true;
+    CHECK(control_manager_submit(&manager, &queued_start, 250001) == ROBOT_COMMAND_INVALID_STATE);
+    CHECK(!fake.supply_on && !fake.coil_on);
+}
+
 int main(void)
 {
     test_arm_gate_and_mix();
@@ -183,6 +306,9 @@ int main(void)
     test_expiry_sequence_and_estop_priority();
     test_watchdog_and_fault_clear();
     test_servo_range_slew_and_disable();
+    test_solenoid_pulse_and_cooldown();
+    test_solenoid_diagnostics_and_safety_stop();
+    test_solenoid_control_timeout();
     if (failures) { fprintf(stderr, "%d assertion(s) failed\n", failures); return 1; }
     puts("control-core host tests: PASS");
     return 0;

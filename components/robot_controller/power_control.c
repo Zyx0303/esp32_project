@@ -8,8 +8,7 @@ esp_err_t power_control_init(power_control_t *control, gpio_num_t gpio)
     ESP_RETURN_ON_FALSE(GPIO_IS_VALID_OUTPUT_GPIO(gpio), ESP_ERR_INVALID_ARG,
                         "power_control", "invalid output GPIO");
 
-    // Set the output latch low before enabling the pin as an output. This keeps
-    // the 2N7002 off and leaves the external active-low interface deasserted.
+    // Set the output latch low before enabling the pin as an output.
     ESP_RETURN_ON_ERROR(gpio_set_level(gpio, 0), "power_control", "set safe level");
     const gpio_config_t config = {
         .pin_bit_mask = 1ULL << gpio,

@@ -1,0 +1,19 @@
+menu "Robot PCB 261111"
+
+config ROBOT_SOL_PULSE_MS
+    int "LY011E coil pulse duration (ms, 0 disables)"
+    range 0 3000
+    default 0
+    help
+        Use a validated duration for the DC 5 V coil. Leave margin for the
+        10 ms control period and task scheduling when choosing this value.
+        Both timing settings must be nonzero to allow coil actuation.
+
+config ROBOT_SOL_COOLDOWN_MS
+    int "LY011E minimum off time (ms, 0 disables)"
+    range 0 3600000
+    default 0
+    help
+        Set from the validated coil duty cycle at the configured pulse length.
+
+endmenu

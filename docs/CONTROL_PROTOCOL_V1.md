@@ -44,7 +44,7 @@ An accepted response means the command entered the control queue. The client rea
 - `GET /api/v1/status`
 - `GET /api/v1/device`
 
-Status includes state, ARM/ESTOP/fault flags, target and ramped motor outputs, target and ramped servo angle, GPIO35 state, DRV8833 fault state, IMU health/raw values, uptime, heap, STA connection/IP/reconnects, SoftAP clients and diagnostic counters.
+Status includes state, ARM/ESTOP/fault flags, target and ramped motor outputs, target and ramped servo angle, solenoid coil state and supply power-good, DRV8833 fault state, IMU health/raw values, uptime, heap, STA connection/IP/reconnects, SoftAP clients and diagnostic counters.
 
 The `network` object also reports `last_disconnect_reason` and `reconnect_delay_ms`.
 STA retries use a bounded 2/4/8/16/30 second backoff so an unavailable router does not continuously
@@ -94,7 +94,7 @@ Both values use `-100..100`. This endpoint is intended for controlled board test
 
 The first command explicitly enables servo PWM. The target is limited by validated configuration and approached using the configured slew rate. DISARM/ESTOP/FAULT disables PWM instead of automatically returning to center.
 
-### GPIO35 external active-low interface
+### LY011E solenoid control
 
 `POST /api/v1/power`
 
@@ -102,7 +102,9 @@ The first command explicitly enables servo PWM. The target is limited by validat
 {"asserted":true}
 ```
 
-`true` drives GPIO35 high and turns on the 2N7002, pulling the external interface low. It is explicit and is not coupled to motor ARM.
+`true` queues one timed extension on PCB 261111. The controller enables SOL_5V, waits for power-good, and then drives the coil for the configured pulse. `false` queues a shutdown. A build with either coil timing parameter set to zero returns HTTP 409 with `sol_actuation_disabled` for extension requests.
+
+In the status response, `power` reports whether the coil output is active, `sol_power_good` reports the regulator's PG input, and `sol_actuation_enabled` indicates that both timing parameters are configured. The PG fault mask is `0x80`.
 
 ## Compatibility endpoints
 

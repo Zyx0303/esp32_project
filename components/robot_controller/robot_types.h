@@ -51,6 +51,7 @@ enum {
     ROBOT_FAULT_QUEUE_OVERFLOW = 1U << 4,
     ROBOT_FAULT_CONFIG_INVALID = 1U << 5,
     ROBOT_FAULT_INTERNAL = 1U << 6,
+    ROBOT_FAULT_SOL_PG = 1U << 7,
 };
 
 typedef struct {
@@ -72,6 +73,7 @@ typedef struct {
         } servo;
         struct {
             bool asserted;
+            bool diagnose_supply;
         } power;
     } value;
 } robot_command_t;
@@ -102,6 +104,8 @@ typedef struct {
     int16_t servo_output_deg;
     bool servo_enabled;
     bool power_asserted;
+    bool sol_power_good;
+    bool sol_actuation_enabled;
     bool drv8833_fault_active;
     bool imu_valid;
     int16_t imu_ax;

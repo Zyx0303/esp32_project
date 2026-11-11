@@ -6,16 +6,17 @@
 #include "esp_log.h"
 #include "power_control.h"
 #include "servo_pwm.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "app_actuators";
 
 typedef struct {
     drv8833_t motor;
     servo_pwm_t servo;
-    power_control_t power;
+    power_control_t coil;
+    power_control_t sol_supply;
     bool motor_available;
     bool servo_available;
-    bool power_available;
 } actuator_context_t;
 
 static actuator_context_t s_actuators = {
@@ -90,13 +91,22 @@ static esp_err_t disable_servo(void *context)
     return servo_pwm_disable(&actuators->servo);
 }
 
-static esp_err_t set_power(void *context, bool asserted)
+static esp_err_t set_coil_enabled(void *context, bool enabled)
 {
     actuator_context_t *actuators = context;
-    if (actuators == NULL || !actuators->power_available) {
-        return asserted ? ESP_ERR_NOT_SUPPORTED : ESP_OK;
-    }
-    return power_control_set_asserted(&actuators->power, asserted);
+    return power_control_set_asserted(&actuators->coil, enabled);
+}
+
+static esp_err_t set_sol_supply_enabled(void *context, bool enabled)
+{
+    actuator_context_t *actuators = context;
+    return power_control_set_asserted(&actuators->sol_supply, enabled);
+}
+
+static bool read_sol_power_good(void *context)
+{
+    (void)context;
+    return gpio_get_level(PIN_SOL_PG) != 0;
 }
 
 static const robot_actuator_ops_t s_actuator_ops = {
@@ -104,17 +114,27 @@ static const robot_actuator_ops_t s_actuator_ops = {
     .set_motors = set_motors,
     .set_servo = set_servo,
     .disable_servo = disable_servo,
-    .set_power_asserted = set_power,
+    .set_coil_enabled = set_coil_enabled,
+    .set_sol_supply_enabled = set_sol_supply_enabled,
+    .read_sol_power_good = read_sol_power_good,
+    .sol_pulse_ms = CONFIG_ROBOT_SOL_PULSE_MS,
+    .sol_cooldown_ms = CONFIG_ROBOT_SOL_COOLDOWN_MS,
 };
 
 esp_err_t app_actuators_init_safe_power(void)
 {
-    ESP_RETURN_ON_ERROR(power_control_init(&s_actuators.power, PIN_POWER_CTRL),
-                        TAG, "initialize power control");
-    ESP_RETURN_ON_ERROR(power_control_set_asserted(&s_actuators.power, false),
-                        TAG, "release external interface");
-    s_actuators.power_available = true;
-    return ESP_OK;
+    ESP_RETURN_ON_ERROR(power_control_init(&s_actuators.coil, PIN_RELEASE_EN),
+                        TAG, "initialize coil switch");
+    ESP_RETURN_ON_ERROR(power_control_init(&s_actuators.sol_supply, PIN_SOL_PWR_EN),
+                        TAG, "initialize solenoid supply");
+    const gpio_config_t pg_config = {
+        .pin_bit_mask = 1ULL << PIN_SOL_PG,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE, // R35 provides the 3.3 V pull-up.
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    return gpio_config(&pg_config);
 }
 
 void app_actuators_init_motion(const robot_config_t *config)

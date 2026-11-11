@@ -1,6 +1,7 @@
 #include "imu_log.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
@@ -16,8 +17,8 @@
 
 #define LOG_ROOT "/imu"
 #define QUEUE_LENGTH 256
-/* Reserve 512 KiB for FAT metadata and finalization in the 8 MiB partition. */
-#define LOG_LIMIT (8 * 1024 * 1024 - 512 * 1024)
+/* Leave room for buffered writes and the log footer on the mounted volume. */
+#define LOG_FREE_RESERVE (16 * 1024)
 
 typedef struct {
     mpu6050_raw_t sample;
@@ -37,6 +38,15 @@ static wl_handle_t s_wl = WL_INVALID_HANDLE;
 static char s_name[16], s_path[32], s_fat_path[32];
 static const char *s_error = "";
 static size_t s_bytes;
+static uint64_t s_log_limit;
+static bool s_download_active;
+
+typedef struct {
+    httpd_req_t *request;
+    FILE *file;
+    char name[16];
+    FSIZE_t size;
+} log_download_t;
 
 static void set_recording(bool active)
 {
@@ -88,7 +98,7 @@ static void drain_samples(void)
             row.sample.gx, row.sample.gy, row.sample.gz, row.sample.temp_raw);
         if (count < 0) { s_error = "write_failed"; seal_file(); break; }
         s_bytes += count;
-        if (s_bytes >= LOG_LIMIT) { s_error = "size_limit"; seal_file(); break; }
+        if (s_bytes >= s_log_limit) { s_error = "size_limit"; seal_file(); break; }
     }
 }
 
@@ -166,6 +176,97 @@ static esp_err_t reply(httpd_req_t *req)
     return httpd_resp_sendstr(req, json);
 }
 
+static void set_download_active(bool active)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_download_active = active;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void download_task(void *argument)
+{
+    log_download_t *download = argument;
+    httpd_req_t *req = download->request;
+    httpd_handle_t server = req->handle;
+    int socket = httpd_req_to_sockfd(req);
+    char disposition[80], length[24], buffer[1024];
+
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", download->name);
+    snprintf(length, sizeof(length), "%" PRIu64, (uint64_t)download->size);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Log-Size", length);
+
+    esp_err_t result = ESP_OK;
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), download->file)) > 0) {
+        result = httpd_resp_send_chunk(req, buffer, count);
+        if (result != ESP_OK) break;
+    }
+    if (ferror(download->file)) result = ESP_FAIL;
+    fclose(download->file);
+    if (result == ESP_OK) result = httpd_resp_send_chunk(req, NULL, 0);
+    httpd_req_async_handler_complete(req);
+    if (result != ESP_OK) httpd_sess_trigger_close(server, socket);
+
+    free(download);
+    set_download_active(false);
+    vTaskDelete(NULL);
+}
+
+/* Caller holds the file lock while validating and opening a sealed log. */
+static esp_err_t start_download(httpd_req_t *req)
+{
+    char name[16], path[32], fat_path[32], query[64];
+    snprintf(name, sizeof(name), "%s", s_name);
+    if (httpd_req_get_url_query_len(req) > 0 &&
+        (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+         httpd_query_key_value(query, "file", name, sizeof(name)) != ESP_OK)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename query");
+    }
+
+    bool valid = strlen(name) == 11 && name[0] == 'I' && strcmp(name + 7, ".log") == 0;
+    for (int i = 1; valid && i <= 6; ++i) valid = name[i] >= '0' && name[i] <= '9';
+    snprintf(path, sizeof(path), LOG_ROOT "/%s", name);
+    snprintf(fat_path, sizeof(fat_path), "%u:/%s", (unsigned)ff_diskio_get_pdrv_wl(s_wl), name);
+    FILINFO info;
+    if (!valid || f_stat(fat_path, &info) != FR_OK || !(info.fattrib & AM_RDO)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Stop and seal recording first");
+    }
+
+    // Keep at most one socket and one FAT file occupied by a download.
+    portENTER_CRITICAL(&s_lock);
+    bool busy = s_download_active;
+    portEXIT_CRITICAL(&s_lock);
+    if (busy) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Another log download is in progress");
+    }
+    log_download_t *download = calloc(1, sizeof(*download));
+    if (!download) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Log download unavailable");
+    }
+    download->file = fopen(path, "rb");
+    if (!download->file ||
+        httpd_req_async_handler_begin(req, &download->request) != ESP_OK) {
+        if (download->file) fclose(download->file);
+        free(download);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Log download unavailable");
+    }
+    snprintf(download->name, sizeof(download->name), "%s", name);
+    download->size = info.fsize;
+    set_download_active(true);
+    if (xTaskCreate(download_task, "imu_download", 4096, download, 3, NULL) != pdPASS) {
+        fclose(download->file);
+        httpd_resp_send_err(download->request, HTTPD_500_INTERNAL_SERVER_ERROR, "Log download unavailable");
+        httpd_req_async_handler_complete(download->request);
+        free(download);
+        set_download_active(false);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t log_handler(httpd_req_t *req)
 {
     if (!s_file_lock) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "IMU storage unavailable");
@@ -180,6 +281,13 @@ static esp_err_t log_handler(httpd_req_t *req)
                 result = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "IMU has no fresh interrupt samples");
                 goto done;
             }
+            uint64_t total_bytes, free_bytes;
+            if (esp_vfs_fat_info(LOG_ROOT, &total_bytes, &free_bytes) != ESP_OK ||
+                free_bytes <= LOG_FREE_RESERVE) {
+                result = httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "IMU log storage is full or unreadable");
+                goto done;
+            }
+            s_log_limit = free_bytes - LOG_FREE_RESERVE;
             /* Unique 8.3 names work without optional FatFs long filename support. */
             char previous_name[sizeof(s_name)], previous_path[sizeof(s_path)], previous_fat[sizeof(s_fat_path)];
             memcpy(previous_name, s_name, sizeof(s_name));
@@ -222,42 +330,7 @@ static esp_err_t log_handler(httpd_req_t *req)
         drain_samples();
         seal_file();
     } else if (strncmp(req->uri, "/api/v1/imu/log/download", strlen("/api/v1/imu/log/download")) == 0) {
-        char name[16], path[32], fat_path[32], query[64];
-        snprintf(name, sizeof(name), "%s", s_name);
-        if (httpd_req_get_url_query_len(req) > 0) {
-            if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-                httpd_query_key_value(query, "file", name, sizeof(name)) != ESP_OK) {
-                result = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename query");
-                goto done;
-            }
-        }
-        bool valid = strlen(name) == 11 && name[0] == 'I' && strcmp(name + 7, ".log") == 0;
-        for (int i = 1; valid && i <= 6; ++i) valid = name[i] >= '0' && name[i] <= '9';
-        snprintf(path, sizeof(path), LOG_ROOT "/%s", name);
-        snprintf(fat_path, sizeof(fat_path), "%u:/%s", (unsigned)ff_diskio_get_pdrv_wl(s_wl), name);
-        FILINFO info;
-        if (!valid || f_stat(fat_path, &info) != FR_OK || !(info.fattrib & AM_RDO)) {
-            result = httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Stop and seal recording first");
-            goto done;
-        }
-        FILE *file = fopen(path, "rb");
-        if (!file) {
-            result = httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Log unavailable");
-            goto done;
-        }
-        char disposition[80], buffer[1024];
-        snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", name);
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_set_hdr(req, "Content-Disposition", disposition);
-        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-        size_t size;
-        while ((size = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-            result = httpd_resp_send_chunk(req, buffer, size);
-            if (result != ESP_OK) break;
-        }
-        if (ferror(file)) result = ESP_FAIL;
-        fclose(file);
-        if (result == ESP_OK) result = httpd_resp_send_chunk(req, NULL, 0);
+        result = start_download(req);
         goto done;
     }
     result = reply(req);

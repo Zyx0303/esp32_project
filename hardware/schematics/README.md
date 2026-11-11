@@ -23,7 +23,7 @@ Wi-Fi 向浏览器及桌面上位机提供控制能力。
 - 电机斜坡、反转换向死区、3 秒断链宽限和 nFAULT 连续采样故障处理；
 - 50 Hz 舵机 PWM、角度限制、脉宽配置和速率限制；
 - MPU6050 初始化、WHO_AM_I 检查和 100 Hz 原始数据采样；
-- GPIO35 经 2N7002 控制外部低有效接口；
+- LY011E 推拉杆供电就绪检测和限时伸出；
 - Wi-Fi APSTA、HTTP v1 API、浏览器页面和 Python 桌面上位机；
 - UART0 调试控制；
 - `BOOT / SAFE / READY / RUNNING / FAULT / ESTOP` 安全状态机；
@@ -45,7 +45,7 @@ Wi-Fi 向浏览器及桌面上位机提供控制能力。
 - IMU：MPU6050，I2C 地址 `0x68`
 - USB 转串口：CH340，连接 ESP32-S3 UART0
 - 当前原理图：
-  [`hardware/schematics/robot_controller_2026-07-31.svg`](hardware/schematics/robot_controller_2026-07-31.svg)
+  [11 月 11 日原理图](SCH_Schematic3_2_1-原理图_2026-11-11.svg)
 
 最新原理图对应的引脚如下。代码中的唯一引脚来源是
 [`components/robot_controller/board_pins.h`](components/robot_controller/board_pins.h)。
@@ -62,7 +62,9 @@ Wi-Fi 向浏览器及桌面上位机提供控制能力。
 | MPU6050 INT | 8 | 数字输入 | 预留 DATA_READY 中断 |
 | MPU6050 SCL | 11 | I2C，400 kHz | 需要合适的外部上拉 |
 | MPU6050 SDA | 12 | I2C，400 kHz | 需要合适的外部上拉 |
-| 外部接口控制 | 35 | 数字输出 | 高电平导通 2N7002，使外部接口拉低 |
+| RELEASE_EN | 7 | 数字输出 | 高电平开启线圈低侧开关 |
+| SOL_PWR_EN | 15 | 数字输出 | 高电平开启 SOL_5V |
+| SOL_PG | 16 | 数字输入 | 高电平表示 SOL_5V 就绪 |
 | BOOT | 0 | 启动绑带输入 | 手动进入下载模式 |
 
 GPIO3、GPIO45 和 GPIO46 是 ESP32-S3 启动绑带引脚。复位采样完成后可以作为普通
@@ -92,7 +94,7 @@ GPIO 使用，但外部电路不能在上电或复位采样期间强制这些引
                          │
                          ▼
                     app_actuators
-                 电机 / 舵机 / GPIO35
+                 电机 / 舵机 / 推拉杆
 
 MPU6050 ── I2C ──► app_imu ──► app_status ◄── control_task
                                       │
@@ -104,7 +106,7 @@ MPU6050 ── I2C ──► app_imu ──► app_status ◄── control_task
 | 文件 | 职责 |
 |---|---|
 | `app_main.c` | 只负责安全启动顺序和模块装配 |
-| `app_actuators.c` | 将控制管理器的抽象操作适配到 DRV8833、舵机和 GPIO35 |
+| `app_actuators.c` | 将控制管理器的抽象操作适配到 DRV8833、舵机和推拉杆 |
 | `app_control.c` | 统一命令队列、队列溢出处理和 100 Hz 控制任务 |
 | `app_imu.c` | I2C 初始化、MPU6050 探测和 100 Hz 采样任务 |
 | `app_console.c` | UART0 初始化、命令解析和诊断输出 |
@@ -149,7 +151,7 @@ BOOT ──初始化完成──► SAFE ──ARM──► READY ──运动�
 
 上电时固件按以下顺序建立安全状态：
 
-1. GPIO35 外部接口释放；
+1. 线圈开关与 SOL_5V 使能均为低；
 2. DRV8833 休眠且电机目标为零；
 3. 舵机 PWM 保持关闭，不会自动转到 90°；
 4. 状态机进入 `SAFE`；
@@ -324,6 +326,7 @@ drive <throttle -100..100> <steering -100..100>
 motors <motor_a -100..100> <motor_b -100..100>
 servo <0..180>
 power <0|1>
+sol_test
 ```
 
 示例：
@@ -354,7 +357,7 @@ disarm
 | `POST /api/v1/drive` | 油门与转向差速混控 | `{"throttle":20,"steering":-10}` |
 | `POST /api/v1/motors` | Motor A/B 独立控制 | `{"motor_a":20,"motor_b":-20}` |
 | `POST /api/v1/servo` | 设置舵机目标角度 | `{"angle":90}` |
-| `POST /api/v1/power` | 控制 GPIO35 外部接口 | `{"asserted":true}` |
+| `POST /api/v1/power` | 请求一次推拉杆伸出或断电 | `{"asserted":true}` |
 
 PowerShell 调用示例：
 
@@ -449,7 +452,7 @@ python tools\p0_preflight.py --idf-build
 ### 联网后的无运动冒烟测试
 
 以下命令会自动发现 ESP32，验证设备信息、状态查询、ARM、DISARM、ESTOP 和 CLEAR，
-但不会发送电机、舵机或 GPIO35 输出：
+但不会发送电机、舵机或推拉杆输出：
 
 ```powershell
 python tools\robot_smoke_test.py
@@ -464,6 +467,14 @@ python tools\robot_smoke_test.py --allow-motion --test motor-a
 随后还必须在终端输入大写 `MOVE`。Motor A/B 阶段限制为 10% 输出、0.6 秒，并在
 `finally` 路径中归零和 DISARM。`--yes` 只允许在具有独立急停和限流电源的自动化台架使用。
 
+## LY011E 通电参数
+
+新版使用 DC 5 V / 1 A、4 mm 行程的 LY011E。默认固件允许串口空载诊断，线圈伸出功能保持锁定。
+确认线圈铭牌及工作制后，在 `idf.py menuconfig` 的 **Robot PCB 261111** 菜单设置
+`CONFIG_ROBOT_SOL_PULSE_MS` 和 `CONFIG_ROBOT_SOL_COOLDOWN_MS`。两项都大于零时可请求限时伸出。
+固件每 10 ms 检查输出期限，设置脉宽时应给控制周期和任务调度预留裕量。
+`power 1` 提交一次伸出请求，`power 0` 关断。PG 超时或掉线将关断并锁存故障位 `0x80`。
+
 ## 13. 最新 PCB 首次上电流程
 
 建议使用限流电源，并让轮子悬空或拆除机械负载。测试顺序：
@@ -472,7 +483,7 @@ python tools\robot_smoke_test.py --allow-motion --test motor-a
 2. 只连接 USB，验证 CH340、下载、复位和串口启动；
 3. 在 `SAFE` 状态验证 MPU6050、I2C 和 100 Hz 采样；
 4. 验证 DRV8833 nFAULT 的空闲电平和故障上报；
-5. 验证 GPIO35/2N7002 的实际高低电平关系；
+5. 断开推拉杆线圈，在 SAFE 状态执行 `sol_test`，用万用表确认 SOL_5V 和串口 `status` 中的 `sol_pg`。线圈开关保持关闭，供电约 10 秒后自动停止。也可用 `power 0` 提前关断。
 6. 单独给舵机供电，限制机械行程后验证 PWM 和方向；
 7. 显式 ARM，以低占空比测试 Motor A；
 8. 停止并 DISARM，再以同样方法测试 Motor B；
@@ -537,7 +548,7 @@ sdkconfig.release.defaults       Release 附加配置
 
 - [ ] 烧录最新模块化固件，通过串口确认 STA 成功连接局域网；
 - [ ] 在电脑保持联网的情况下验证控制页及全部 HTTP v1 接口；
-- [ ] 使用最新 PCB 完成 USB、IMU、GPIO35、舵机、单电机和双电机分阶段测试；
+- [ ] 使用最新 PCB 完成 USB、IMU、推拉杆、舵机、单电机和双电机分阶段测试；
 - [ ] 使用 GPIO8 DATA_READY 中断，并增加 I2C 恢复和丢帧统计；
 - [ ] 完成 IMU 单位换算、零偏校准、低通滤波和 NVS 校准参数；
 - [ ] 完善上位机中文提示、实时状态和 Xbox/XInput 控制；

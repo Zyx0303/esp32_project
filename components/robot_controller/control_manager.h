@@ -13,7 +13,11 @@ typedef struct {
                             int16_t motor_b_percent);
     esp_err_t (*set_servo)(void *context, int16_t angle_deg);
     esp_err_t (*disable_servo)(void *context);
-    esp_err_t (*set_power_asserted)(void *context, bool asserted);
+    esp_err_t (*set_coil_enabled)(void *context, bool enabled);
+    esp_err_t (*set_sol_supply_enabled)(void *context, bool enabled);
+    bool (*read_sol_power_good)(void *context);
+    uint32_t sol_pulse_ms;
+    uint32_t sol_cooldown_ms;
 } robot_actuator_ops_t;
 
 typedef struct {
@@ -22,6 +26,13 @@ typedef struct {
     bool reversing;
     int64_t reverse_release_at_us;
 } robot_motor_axis_t;
+
+typedef enum {
+    SOL_OFF = 0,
+    SOL_WAITING_FOR_POWER,
+    SOL_EXTENDING,
+    SOL_TESTING_SUPPLY,
+} sol_state_t;
 
 typedef struct {
     robot_state_machine_t state_machine;
@@ -38,6 +49,12 @@ typedef struct {
     uint32_t servo_ramp_remainder;
     int16_t servo_output_deg;
     robot_fault_mask_t active_hardware_faults;
+    sol_state_t sol_state;
+    bool sol_diagnose_supply;
+    int64_t sol_deadline_us;
+    int64_t sol_cooldown_until_us;
+    int64_t sol_command_expires_us;
+    int64_t sol_last_cancel_us;
 } control_manager_t;
 
 robot_control_config_t control_manager_default_config(void);

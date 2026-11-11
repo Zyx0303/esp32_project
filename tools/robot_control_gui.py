@@ -136,14 +136,14 @@ Motor A / Motor B 滑块
     停止独立输出并把 A/B 滑块和电机命令都设为 0。它不会取消 ARM，结束板测后仍需
     点击“DISARM 锁定”。
 
-外部接口与传感器
+推拉杆与传感器
 
-GPIO35 置位
-    请求外部低有效接口进入 asserted 状态。这里控制的是板上的外部接口电路，不是把
-    ESP32 GPIO35 当作普通高电平输出；只有确认原理图和外部负载含义后才能使用。
+推拉杆伸出
+    提交一次 LY011E 伸出请求。电源就绪后，固件按配置时长给线圈通电。
+    未配置线圈通电时长和冷却间隔时，伸出按钮保持禁用。
 
-GPIO35 释放
-    解除外部接口的 asserted 状态，通常用于结束该接口测试或恢复安全状态。
+推拉杆断电
+    关闭线圈和推拉杆电源。
 
 IMU 状态
     只读显示 MPU6050 的有效标志、加速度、角速度、样本数和错误数。查看 IMU 不需要
@@ -359,7 +359,7 @@ class RobotControllerApp(tk.Tk):
         self.motor_b_var = tk.IntVar(value=0)
         self.motor_a_text_var = tk.StringVar(value="0%")
         self.motor_b_text_var = tk.StringVar(value="0%")
-        self.power_status_var = tk.StringVar(value="GPIO35：--")
+        self.power_status_var = tk.StringVar(value="推拉杆：--")
         self.angle_var = tk.IntVar(value=90)
         self.angle_text_var = tk.StringVar(value="90°")
         self.tooltips: list[ToolTip] = []
@@ -693,22 +693,23 @@ class RobotControllerApp(tk.Tk):
         self._tip(direct_start, "按滑块值持续输出；先架空轮子、低幅值并完成 ARM。")
         self._tip(direct_zero, "停止独立输出并把 A/B 数值归零。")
 
-        auxiliary = ttk.LabelFrame(controls, text="外部接口与 IMU", style="Card.TLabelframe", padding=16)
+        auxiliary = ttk.LabelFrame(controls, text="推拉杆与 IMU", style="Card.TLabelframe", padding=16)
         auxiliary.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(6, 0))
         auxiliary.columnconfigure((0, 1), weight=1)
         ttk.Label(auxiliary, textvariable=self.power_status_var, style="Value.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
-        gpio_assert = ttk.Button(
-            auxiliary, text="GPIO35 置位", style="Warning.TButton", command=lambda: self.set_power(True)
+        self.sol_extend_button = ttk.Button(
+            auxiliary, text="推拉杆伸出", style="Warning.TButton", command=lambda: self.set_power(True)
         )
-        gpio_release = ttk.Button(
-            auxiliary, text="GPIO35 释放", style="Secondary.TButton", command=lambda: self.set_power(False)
+        sol_off_button = ttk.Button(
+            auxiliary, text="推拉杆断电", style="Secondary.TButton", command=lambda: self.set_power(False)
         )
-        gpio_assert.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(12, 0))
-        gpio_release.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
-        self._tip(gpio_assert, "激活板上的外部低有效接口；确认原理图和负载后使用。")
-        self._tip(gpio_release, "释放外部低有效接口，恢复非激活状态。")
+        self.sol_extend_button.configure(state="disabled")
+        self.sol_extend_button.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(12, 0))
+        sol_off_button.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
+        self._tip(self.sol_extend_button, "按固件配置的时长给 LY011E 线圈通电。")
+        self._tip(sol_off_button, "停止当前动作并关闭线圈电源。")
         ttk.Separator(auxiliary).grid(row=2, column=0, columnspan=2, sticky="ew", pady=14)
         ttk.Label(auxiliary, text="IMU 实时摘要", style="Muted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
         ttk.Label(
@@ -1062,6 +1063,7 @@ class RobotControllerApp(tk.Tk):
         if not result.ok:
             self.connection_var.set("● 未连接")
             self.connection_label.configure(style="Offline.TLabel")
+            self.sol_extend_button.configure(state="disabled")
             if result.operation != "status" or not getattr(self, "_last_status_error", False):
                 self._log(f"{result.operation} 失败：{result.error}")
             self._last_status_error = True
@@ -1089,7 +1091,12 @@ class RobotControllerApp(tk.Tk):
             suffix = "" if servo.get("enabled") else "（关闭）"
             self.servo_status_var.set(f"舵机：{servo.get('output', '--')}°{suffix}")
         if "power" in payload:
-            self.power_status_var.set(f"GPIO35：{'置位' if payload.get('power') else '释放'}")
+            supply = "就绪" if payload.get("sol_power_good") else "未就绪"
+            coil = "通电" if payload.get("power") else "断电"
+            enabled = payload.get("sol_actuation_enabled") is True
+            suffix = "" if enabled else " · 伸出已锁定"
+            self.power_status_var.set(f"电源{supply} · 线圈{coil}{suffix}")
+            self.sol_extend_button.configure(state="normal" if enabled else "disabled")
         imu = payload.get("imu")
         if isinstance(imu, dict):
             if imu.get("valid"):

@@ -1,6 +1,6 @@
 # 新人快速上手
 
-本指南用于在 Windows 上完成：配置环境 → 编译烧录 → 连接 Wi-Fi → 启动上位机 →
+本指南介绍如何在 Windows 上完成配置环境 → 编译烧录 → 连接 Wi-Fi → 打开板载实验台 →
 无运动验证。编译本身不需要连接开发板。
 
 > 安全提示：设备上电默认处于 `SAFE`。首次使用只做无运动验证；接电机、舵机或新 PCB
@@ -76,45 +76,19 @@ idf.py -p COM8 flash monitor
 如果无法进入下载模式：按住 `BOOT`，短按并松开 `EN/RST`，再松开 `BOOT` 后重新烧录。
 如果没有 COM 端口，依次检查数据线、USB 接口、CH340 驱动和设备管理器。
 
-## 4. 启动上位机
+## 4. 打开板载实验台
 
-让电脑与 ESP32 连接同一个局域网，然后双击项目根目录中的：
+电脑或手机连接 `ESP32-Robot` 热点（密码 `esp32robot`），在浏览器打开
+[http://192.168.4.1/](http://192.168.4.1/)。页面由控制板提供，无需运行 Python，也不依赖互联网。
+如果 ESP32 已连到局域网，也可从同一局域网打开串口日志显示的设备地址。
 
-```text
-start_robot_control.bat
-```
+- 上电保持 `SAFE`。先看设备状态和 IMU，再按需解锁电机、舵机和推拉杆控制。
+- 在「IMU 实验」中可查看实时原始数据。点击「开始录制」后由板端以 100 Hz 保存，
+  点击「结束录制」后下载封存的 `.log` 文件。重连可查看板上记录状态并重试下载。
+- 若显示「日志状态不可用」，仍可查看实时 IMU 数据。请检查串口中的存储挂载日志。
 
-也可以使用终端：
-
-```powershell
-# 自动发现并启动上位机
-python tools\start_robot_control.py
-
-# 只查找设备，不打开界面
-python tools\start_robot_control.py --find-only
-
-# 已知设备 IP
-python tools\start_robot_control.py --url http://192.168.1.123
-```
-
-自动发现只读取设备信息，不会 ARM 或发送运动命令。
-
-局域网不可用时，可连接 ESP32 的救援热点：
-
-```text
-SSID：ESP32-Robot
-密码：esp32robot
-地址：http://192.168.4.1
-```
-
-连接救援热点后，单 Wi-Fi 网卡的电脑通常会暂时失去互联网。
-
-### 使用手机浏览器
-
-手机也可以直接控制，无需运行电脑上位机：连接 `ESP32-Robot`（密码 `esp32robot`），
-浏览器打开 `http://192.168.4.1/`；或让手机与 ESP32 连接同一 Wi-Fi，打开 ESP32 的局域网 IP。
-等待「已连接」后 ARM，按住方向键行驶、松手停车。切后台或锁屏时页面会尽力请求停止并锁定。
-详细操作和断线保护边界见 [手机 HTTP 控制](PHONE_HTTP_CONTROL.md)。
+操作及断线保护见 [板载 HTTP 控制](PHONE_HTTP_CONTROL.md)。原有 Python 客户端仍可通过
+`start_robot_control.bat` 或 `python tools/start_robot_control.py` 启动。
 
 ## 5. 首次安全验证
 
@@ -130,7 +104,7 @@ python tools\robot_smoke_test.py
 SAFE → READY → SAFE → ESTOP → SAFE
 ```
 
-测试不会输出电机、舵机或 GPIO35，结束时应显示 `[PASS]` 并回到 `SAFE`。
+测试不会输出电机、舵机或 推拉杆，结束时应显示 `[PASS]` 并回到 `SAFE`。
 
 提交代码前运行开发门禁：
 

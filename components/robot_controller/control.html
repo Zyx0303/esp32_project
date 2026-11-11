@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#edf3f3">
-<title>机器人 · 手机控制</title>
+<title>机器人实验台</title>
 <style>
 :root{color-scheme:light;--ink:#173332;--muted:#617875;--line:#dce7e4;--green:#087f6e;--red:#b33238}
 *{box-sizing:border-box}body{margin:0;background:#edf3f3;color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:900px;margin:auto;padding:20px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 0 18px}h1{font-size:23px;margin:3px 0}h2{font-size:18px;margin:0 0 14px}.eyebrow{font-size:12px;letter-spacing:2px;color:var(--muted)}
+main{max-width:1040px;margin:auto;padding:20px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 0 18px}h1{font-size:23px;margin:3px 0}h2{font-size:18px;margin:0 0 14px}
 .badge{font-size:13px;border-radius:24px;background:#e0e9e6;padding:8px 12px;white-space:nowrap}.badge.online{background:#d8f1e7;color:#08694f}
 .safety{position:sticky;top:0;z-index:5;background:#edf3f3;padding:10px 0;border-bottom:1px solid var(--line)}.row{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap}.row>*{flex:1}.row .wide{flex:2}
 button{font:inherit;font-weight:650;min-height:48px;border:1px solid var(--line);border-radius:12px;padding:10px 14px;background:#fff;color:var(--ink);cursor:pointer;-webkit-tap-highlight-color:transparent}
@@ -19,13 +19,16 @@ button.primary{background:var(--green);border-color:var(--green);color:white}but
 input[type=range]{width:100%;height:40px;accent-color:var(--green);margin:0}.pad{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-areas:". forward ." "left stop right" ". backward .";gap:10px;max-width:340px;margin:14px auto}.pad button{min-height:70px;font-size:17px;padding:10px 4px}
 .hold{touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.hold.active{background:var(--green);color:white}.pad .forward{grid-area:forward}.pad .backward{grid-area:backward}.pad [data-direction=left]{grid-area:left}.pad [data-direction=right]{grid-area:right}.pad .stop{grid-area:stop;background:#e8f2ef;color:#087060}
 .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#f3f7f5;border-radius:12px;padding:12px}.metric span{font-size:12px;color:var(--muted);display:block}.metric strong{display:block;margin-top:5px;font-size:18px;font-variant-numeric:tabular-nums}
+.experiment{grid-column:1/-1}.experiment .metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+.experiment .row{margin-top:16px}.experiment .metric strong{font-size:16px;overflow-wrap:anywhere}
+.log-status{min-height:2em}
 details{margin-top:16px}summary{cursor:pointer;font-size:14px;color:var(--muted);padding:6px 0}pre{font-size:12px;background:#f3f7f5;padding:12px;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto}footer{font-size:12px;text-align:center;color:var(--muted);padding-top:20px}
-@media(max-width:640px){.grid{grid-template-columns:1fr}.card{padding:17px}.safety button{padding:10px 8px}main{padding-top:14px}header{margin-bottom:10px}}
+@media(max-width:640px){.experiment .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid{grid-template-columns:1fr}.card{padding:17px}.safety button{padding:10px 8px}main{padding-top:14px}header{margin-bottom:10px}}
 </style>
 </head>
 <body>
 <main>
-<header><div><div class="eyebrow">ESP32-S3 / WI-FI</div><h1>机器人控制台</h1></div><span id="connection" class="badge" role="status">正在连接</span></header>
+<header><h1>机器人实验台</h1><span id="connection" class="badge" role="status">正在连接</span></header>
 <section class="safety" aria-label="安全控制">
   <div class="row"><button id="arm" class="primary" disabled>解锁 ARM</button><button id="disarm">停止并锁定</button><button id="estop" class="danger wide">急停</button></div>
   <p id="message" class="notice" role="status" aria-live="polite">连接后先解锁，再按住方向键。松手即停车。</p>
@@ -48,11 +51,11 @@ details{margin-top:16px}summary{cursor:pointer;font-size:14px;color:var(--muted)
   <h2>设备状态</h2>
   <div class="metrics">
     <div class="metric"><span>安全状态</span><strong id="state">—</strong></div>
-    <div class="metric"><span>电机故障</span><strong id="fault">—</strong></div>
-    <div class="metric"><span>Motor A 实际输出</span><strong id="motorA">—</strong></div>
-    <div class="metric"><span>Motor B 实际输出</span><strong id="motorB">—</strong></div>
+    <div class="metric"><span>设备故障</span><strong id="fault">—</strong></div>
+    <div class="metric"><span>Motor A 目标 / 实际</span><strong id="motorA">—</strong></div>
+    <div class="metric"><span>Motor B 目标 / 实际</span><strong id="motorB">—</strong></div>
     <div class="metric"><span>IMU</span><strong id="imu">—</strong></div>
-    <div class="metric"><span>外部接口 GPIO35</span><strong id="power">—</strong></div>
+    <div class="metric"><span>推拉杆</span><strong id="power">—</strong></div>
   </div>
   <p id="address" class="hint"></p>
   <button id="clear" style="margin-top:14px;width:100%" disabled>清除故障 / 急停</button>
@@ -60,13 +63,14 @@ details{margin-top:16px}summary{cursor:pointer;font-size:14px;color:var(--muted)
   <details><summary>查看完整状态</summary><pre id="raw">等待设备响应…</pre></details>
 </section>
 <section class="card">
-  <h2>舵机与外部接口</h2>
+  <h2>舵机与推拉杆</h2>
+  <p id="servoState" class="hint">舵机状态待连接</p>
   <label class="label" for="angle">舵机角度 <output id="angleValue">90°</output></label>
   <input id="angle" type="range" min="0" max="180" step="1" value="90">
   <button id="servo" data-actuator disabled style="width:100%">发送角度</button>
   <p class="hint">拖动仅设置目标，点击后才输出。停止并锁定会关闭舵机 PWM。</p>
-  <div class="row" style="margin-top:16px"><button id="powerOn" data-actuator disabled>GPIO35 置位</button><button id="powerOff" data-actuator disabled>GPIO35 释放</button></div>
-  <p class="hint">GPIO35 置位会使外部接口拉低。舵机与外部接口会保持目标；操作结束请点击「停止并锁定」，关闭全部输出。</p>
+  <div class="row" style="margin-top:16px"><button id="powerOn" data-actuator disabled>推拉杆伸出</button><button id="powerOff" data-actuator disabled>推拉杆断电</button></div>
+  <p class="hint">电源就绪后按设定时长驱动线圈。操作结束请点击「停止并锁定」。</p>
 </section>
 <section class="card">
   <h2>双电机独立控制</h2>
@@ -77,12 +81,30 @@ details{margin-top:16px}summary{cursor:pointer;font-size:14px;color:var(--muted)
   <div class="row" style="margin-top:8px"><button id="direct" class="primary" data-actuator disabled>开始输出</button><button id="directStop">停止双电机</button></div>
   <p class="hint">正负值代表相反方向。设好滑块后点击「开始输出」，电机会持续运行；点击「停止双电机」停车。调整滑块后，点击「更新输出」应用新目标。</p>
 </section>
+<section class="card experiment">
+  <h2>IMU 实验</h2>
+  <div class="metrics">
+    <div class="metric"><span>加速度 X / Y / Z（原始值）</span><strong id="accel">—</strong></div>
+    <div class="metric"><span>角速度 X / Y / Z（原始值）</span><strong id="gyro">—</strong></div>
+    <div class="metric"><span>温度（原始值）</span><strong id="imuTemp">—</strong></div>
+    <div class="metric"><span>采样 / 错误</span><strong id="imuCounts">—</strong></div>
+  </div>
+  <div class="row">
+    <button id="logStart" class="primary" disabled>开始录制</button>
+    <button id="logStop" disabled>结束录制</button>
+    <button id="logDownload" disabled>下载日志</button>
+  </div>
+  <p id="logStatus" class="hint log-status" role="status" aria-live="polite">正在读取日志存储状态</p>
+  <p class="hint">由板端以 100 Hz 记录。上方读数用于实时观察。</p>
+</section>
 </div>
-<footer>无需安装 App · 手机与设备在同一 Wi-Fi，或连接 ESP32-Robot 热点</footer>
 </main>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
+let solActuationEnabled = false;
+let logState = null, logBusy = false, logPolling = false, logDownloadBusy = false;
+let logNextPollAt = 0;
 const actuatorButtons = [...document.querySelectorAll('[data-actuator]')];
 let connected = false, armed = false, authorized = false, stopping = false;
 let deviceState = 'UNKNOWN';
@@ -99,8 +121,10 @@ function permitted() {
 }
 function updateButtons() {
   actuatorButtons.forEach(button => { button.disabled = !permitted(); });
+  $('powerOn').disabled = !permitted() || !solActuationEnabled;
   $('arm').disabled = !connected || armed || deviceState !== 'SAFE' || stopping || document.hidden;
   $('clear').disabled = !connected || armed || stopping || document.hidden;
+  updateLogButtons();
 }
 async function request(path, payload, controller = new AbortController(), keepalive = false) {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -111,11 +135,101 @@ async function request(path, payload, controller = new AbortController(), keepal
       body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: controller.signal, keepalive
     });
+    const contentType = response.headers?.get('Content-Type');
+    if (!response.ok && contentType && !contentType.includes('application/json')) {
+      throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+    }
     const result = await response.json();
     if (!response.ok || result.ok !== true) throw new Error(result.error || `HTTP ${response.status}`);
     return result;
   } finally { clearTimeout(timeout); }
 }
+function updateLogButtons() {
+  const unavailable = !connected || !logState || logBusy || logPolling || logDownloadBusy;
+  $('logStart').disabled = unavailable || logState.recording;
+  $('logStop').disabled = unavailable || !logState.recording;
+  $('logDownload').disabled = unavailable || !logState.sealed;
+}
+
+function setLogState(result) {
+  logState = result;
+  const name = result.file || '';
+  const state = result.recording ? `正在录制 ${name}`
+    : result.sealed ? `已封存 ${name}` : '尚无可下载的日志';
+  $('logStatus').textContent = `${state} · 队列丢帧 ${result.dropped ?? 0}${result.error ? ` · ${result.error}` : ''}`;
+}
+
+async function pollImuLog() {
+  if (!connected || document.hidden || logPolling || logBusy || logDownloadBusy ||
+      Date.now() < logNextPollAt) return;
+  logPolling = true;
+  updateLogButtons();
+  logNextPollAt = Date.now() + 1500;
+  try {
+    setLogState(await request('/api/v1/imu/log/status'));
+  } catch (error) {
+    logState = null;
+    $('logStatus').textContent = `日志状态不可用：${error.message}`;
+  } finally {
+    logPolling = false;
+    updateLogButtons();
+  }
+}
+
+async function changeRecording(action) {
+  if (!connected || !logState || logBusy || logPolling || logDownloadBusy ||
+      (action === 'start' ? logState.recording : !logState.recording)) return;
+  logBusy = true;
+  updateLogButtons();
+  try {
+    setLogState(await request(`/api/v1/imu/log/${action}`, {}));
+  } catch (error) {
+    $('logStatus').textContent = `录制请求未确认：${error.message}。正在重新读取设备状态。`;
+    logState = null;
+    logNextPollAt = 0;
+  } finally {
+    logBusy = false;
+    updateLogButtons();
+  }
+}
+
+async function downloadLog() {
+  if (!connected || logBusy || logPolling || logDownloadBusy || !logState?.sealed) return;
+  const name = logState.file;
+  if (!/^I[0-9]{6}\.log$/.test(name)) return;
+  logDownloadBusy = true;
+  updateLogButtons();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(`/api/v1/imu/log/download?file=${encodeURIComponent(name)}`, {
+      cache: 'no-store', signal: controller.signal
+    });
+    if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+    const file = await response.blob();
+    const expected = response.headers.get('X-Log-Size');
+    if (!file.size || (expected !== null && file.size !== Number(expected))) {
+      throw new Error('日志传输不完整');
+    }
+    const url = URL.createObjectURL(file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    $('logStatus').textContent = `已交给浏览器保存 ${name}`;
+  } catch (error) {
+    $('logStatus').textContent = `下载失败：${error.message}。可再次点击下载。`;
+  } finally {
+    clearTimeout(timeout);
+    logDownloadBusy = false;
+    logNextPollAt = Date.now() + 4000;
+    updateLogButtons();
+  }
+}
+
 function cancelMotion() {
   generation++;
   if (active) active.element.classList.remove('active');
@@ -155,6 +269,7 @@ async function safety(path, text, lock = true, keepalive = false) {
 function disconnected() {
   const hadControl = authorized || active !== null;
   connected = false; authorized = false; armed = false;
+  logNextPollAt = 0;
   $('connection').textContent = '连接异常';
   $('connection').classList.remove('online');
   if (hadControl) void safety('/api/v1/disarm', '已请求停止并锁定', true, true);
@@ -174,22 +289,35 @@ async function pollStatus() {
     if (!armed) { authorized = false; if (active) cancelMotion(); }
     $('connection').textContent = '已连接'; $('connection').classList.add('online');
     $('state').textContent = result.state;
-    $('fault').textContent = result.drv8833_fault || result.faults ? '故障' : '正常';
-    $('motorA').textContent = `${result.motor_a.output}%`;
-    $('motorB').textContent = `${result.motor_b.output}%`;
-    $('imu').textContent = result.imu.valid ? '采样中' : '不可用';
-    $('power').textContent = result.power ? '已置位' : '已释放';
+    $('fault').textContent = result.drv8833_fault || result.faults
+      ? `故障 0x${Number(result.faults || 0).toString(16)}` : '正常';
+    $('motorA').textContent = `${result.motor_a.target ?? '—'}% / ${result.motor_a.output}%`;
+    $('motorB').textContent = `${result.motor_b.target ?? '—'}% / ${result.motor_b.output}%`;
+    const servo = result.servo;
+    $('servoState').textContent = servo
+      ? `目标 ${servo.target}° · 输出 ${servo.enabled ? `${servo.output}°` : '已关闭'}` : '舵机状态不可用';
+    const imu = result.imu;
+    $('imu').textContent = imu.valid ? '采样中' : '不可用';
+    $('accel').textContent = imu.valid ? imu.accel?.join(' / ') ?? '—' : '—';
+    $('gyro').textContent = imu.valid ? imu.gyro?.join(' / ') ?? '—' : '—';
+    $('imuTemp').textContent = imu.valid ? imu.temp_raw ?? '—' : '—';
+    $('imuCounts').textContent = `${imu.samples ?? '—'} / ${imu.errors ?? '—'}`;
+    solActuationEnabled = result.sol_actuation_enabled === true;
+    const supply = result.sol_power_good ? '就绪' : '未就绪';
+    const coil = result.power ? '通电' : '断电';
+    $('power').textContent = `电源${supply} · 线圈${coil}${solActuationEnabled ? '' : ' · 伸出已锁定'}`;
     $('raw').textContent = JSON.stringify(result, null, 2);
     if (!wasConnected) message(armed
       ? '设备已解锁，请先停止并锁定，再从本页解锁。'
       : '已连接。先解锁，再按住方向键。松手即停车。');
     updateButtons();
+    void pollImuLog();
   } catch (error) { if (token === generation && !document.hidden && !stopping) disconnected(); }
   finally { polling = false; }
 }
 async function command(path, payload, text, unlock = false) {
   if (stopping || document.hidden || (unlock ? !connected || armed || deviceState !== 'SAFE' : !permitted())) return;
-  // Servo / GPIO requests are explicit one-shot actions. Avoid mixing them with
+  // Servo and solenoid requests are explicit one-shot actions. Avoid mixing them with
   // an active motor control or with another pending user command.
   if (active || commandController) { message('请先停止电机输出，再操作其他执行器。'); return; }
   const controller = new AbortController(), token = ++generation;
@@ -296,11 +424,16 @@ $('stop').onclick = stopMotors;
 $('directStop').onclick = stopMotors;
 $('direct').onclick = startDirect;
 $('servo').onclick = () => { void command('/api/v1/servo', {angle: +$('angle').value}, '舵机目标已提交'); };
-$('powerOn').onclick = () => { void command('/api/v1/power', {asserted: true}, 'GPIO35 置位请求已提交'); };
-$('powerOff').onclick = () => { void command('/api/v1/power', {asserted: false}, 'GPIO35 释放请求已提交'); };
+$('powerOn').onclick = () => {
+  if (solActuationEnabled) void command('/api/v1/power', {asserted: true}, '推拉杆伸出请求已提交');
+};
+$('powerOff').onclick = () => { void command('/api/v1/power', {asserted: false}, '推拉杆断电请求已提交'); };
 [['speed','speedValue','%'],['angle','angleValue','°'],['leftMotor','leftValue','%'],['rightMotor','rightValue','%']].forEach(([id,out,unit]) => {
   $(id).addEventListener('input', () => { $(out).textContent = $(id).value + unit; });
 });
+$('logStart').onclick = () => { void changeRecording('start'); };
+$('logStop').onclick = () => { void changeRecording('stop'); };
+$('logDownload').onclick = () => { void downloadLog(); };
 $('address').textContent = `当前设备：${location.host}`;
 setInterval(() => { if (active && !permitted()) disconnected(); else void sendMotion(); }, HEARTBEAT_MS);
 setInterval(() => { void pollStatus(); }, STATUS_MS);

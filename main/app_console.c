@@ -83,11 +83,12 @@ static void print_status(void)
     robot_status_t status;
     if (app_status_get(&status)) {
         ESP_LOGI(TAG, "state=%s armed=%d estop=%d faults=0x%08" PRIx32
-                 " motorA=%d/%d motorB=%d/%d servo=%d enabled=%d power=%d",
+                 " motorA=%d/%d motorB=%d/%d servo=%d enabled=%d sol_pg=%d coil=%d actuation_enabled=%d",
                  robot_state_name(status.state), status.armed, status.estop_latched,
                  status.faults, status.motor_a_target, status.motor_a_output,
                  status.motor_b_target, status.motor_b_output, status.servo_target_deg,
-                 status.servo_enabled, status.power_asserted);
+                 status.servo_enabled, status.sol_power_good, status.power_asserted,
+                 status.sol_actuation_enabled);
     }
 
     // 串口 status 始终显示 DHCP 地址，便于在启动日志滚走后重新找到设备。
@@ -162,6 +163,14 @@ static void parse_serial_command(char *line)
         }
         command = serial_command(ROBOT_CMD_POWER_CONTROL);
         command.value.power.asserted = asserted == 1;
+    } else if (strcmp(name, "sol_test") == 0) {
+        if (strtok(NULL, " \r\n") != NULL) {
+            ESP_LOGW(TAG, "usage: sol_test (SAFE, disconnect the coil before testing)");
+            return;
+        }
+        command = serial_command(ROBOT_CMD_POWER_CONTROL);
+        command.value.power.asserted = true;
+        command.value.power.diagnose_supply = true;
     } else if (strcmp(name, "imu") == 0) {
         app_imu_log_latest();
         submit = false;
@@ -171,7 +180,7 @@ static void parse_serial_command(char *line)
     } else if (strcmp(name, "help") == 0) {
         ESP_LOGI(TAG, "arm | disarm | estop | clear | status | imu");
         ESP_LOGI(TAG, "drive <throttle> <steering> | motors <A> <B>");
-        ESP_LOGI(TAG, "servo <0..180> | power <0|1>");
+        ESP_LOGI(TAG, "servo <0..180> | power <0|1> | sol_test (SAFE, supply only)");
         submit = false;
     } else {
         ESP_LOGW(TAG, "unknown command: %s", name);

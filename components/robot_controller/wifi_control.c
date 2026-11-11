@@ -255,7 +255,8 @@ static esp_err_t status_handler(httpd_req_t *req)
              "{\"ok\":true,\"api_version\":%d,\"state\":\"%s\",\"armed\":%s,"
              "\"estop\":%s,\"faults\":%" PRIu32 ",\"motor_a\":{\"target\":%d,\"output\":%d},"
              "\"motor_b\":{\"target\":%d,\"output\":%d},\"servo\":{\"target\":%d,\"output\":%d,\"enabled\":%s},"
-             "\"power\":%s,\"drv8833_fault\":%s,"
+             "\"power\":%s,\"sol_power_good\":%s,\"sol_actuation_enabled\":%s,"
+             "\"drv8833_fault\":%s,"
              "\"imu\":{\"valid\":%s,\"accel\":[%d,%d,%d],\"gyro\":[%d,%d,%d],\"temp_raw\":%d,"
              "\"samples\":%" PRIu32 ",\"errors\":%" PRIu32 ",\"last_update_us\":%" PRId64 "},"
              "\"network\":{\"mode\":\"%s\",\"sta_configured\":%s,\"sta_connected\":%s,"
@@ -272,6 +273,8 @@ static esp_err_t status_handler(httpd_req_t *req)
              status.motor_b_output, status.servo_target_deg, status.servo_output_deg,
              status.servo_enabled ? "true" : "false",
              status.power_asserted ? "true" : "false",
+             status.sol_power_good ? "true" : "false",
+             status.sol_actuation_enabled ? "true" : "false",
              status.drv8833_fault_active ? "true" : "false",
              status.imu_valid ? "true" : "false", status.imu_ax, status.imu_ay,
              status.imu_az, status.imu_gx, status.imu_gy, status.imu_gz,
@@ -331,6 +334,12 @@ static bool json_int(const cJSON *root, const char *name, int *value)
 
 static esp_err_t submit(httpd_req_t *req, robot_command_t *command)
 {
+    if (command->type == ROBOT_CMD_POWER_CONTROL && command->value.power.asserted) {
+        robot_status_t status;
+        if (s_status_cb == NULL || !s_status_cb(&status) || !status.sol_actuation_enabled) {
+            return send_error(req, "409 Conflict", "sol_actuation_disabled");
+        }
+    }
     command->source = ROBOT_COMMAND_SOURCE_WIFI;
     command->received_at_us = esp_timer_get_time();
     command->sequence = ++s_sequence;

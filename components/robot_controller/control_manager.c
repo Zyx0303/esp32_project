@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#define SOL_PG_TIMEOUT_US 250000LL
+#define SOL_DIAGNOSTIC_DURATION_US 10000000LL
+
 static int16_t clamp_percent(int32_t value)
 {
     if (value > 100) {
@@ -83,8 +86,32 @@ static void reset_motor_axis(robot_motor_axis_t *axis)
     axis->reverse_release_at_us = 0;
 }
 
+static esp_err_t stop_solenoid(control_manager_t *manager)
+{
+    if (manager->sol_state == SOL_OFF) {
+        return ESP_OK;
+    }
+
+    const robot_actuator_ops_t *ops = &manager->actuator_ops;
+    esp_err_t coil_err = ops->set_coil_enabled(manager->actuator_context, false);
+    esp_err_t supply_err = ops->set_sol_supply_enabled(manager->actuator_context, false);
+    if (coil_err != ESP_OK || supply_err != ESP_OK) {
+        return coil_err != ESP_OK ? coil_err : supply_err;
+    }
+    if (manager->sol_state == SOL_EXTENDING) {
+        // Start the cooldown from the first timestamp after both outputs are off.
+        manager->sol_cooldown_until_us = INT64_MAX;
+    }
+    manager->sol_state = SOL_OFF;
+    manager->status.power_asserted = false;
+    return ESP_OK;
+}
+
 static void safe_stop(control_manager_t *manager)
 {
+    if (stop_solenoid(manager) != ESP_OK) {
+        robot_state_machine_latch_fault(&manager->state_machine, ROBOT_FAULT_INTERNAL);
+    }
     reset_motor_axis(&manager->motor_a);
     reset_motor_axis(&manager->motor_b);
     manager->status.servo_enabled = false;
@@ -122,6 +149,12 @@ esp_err_t control_manager_init(control_manager_t *manager,
         manager->actuator_ops = *actuator_ops;
     }
     manager->actuator_context = actuator_context;
+    manager->status.sol_actuation_enabled =
+        manager->actuator_ops.set_coil_enabled != NULL &&
+        manager->actuator_ops.set_sol_supply_enabled != NULL &&
+        manager->actuator_ops.read_sol_power_good != NULL &&
+        manager->actuator_ops.sol_pulse_ms > 0 &&
+        manager->actuator_ops.sol_cooldown_ms > 0;
     robot_state_machine_init(&manager->state_machine);
     manager->servo_output_deg = config->servo_initial_deg;
     manager->status.servo_target_deg = config->servo_initial_deg;
@@ -207,11 +240,13 @@ robot_command_result_t control_manager_submit(control_manager_t *manager,
 
     /* Safety commands are deliberately processed before age and sequence checks. */
     if (command->type == ROBOT_CMD_ESTOP) {
+        manager->sol_last_cancel_us = now_us;
         robot_state_machine_latch_estop(&manager->state_machine);
         safe_stop(manager);
         return ROBOT_COMMAND_ACCEPTED;
     }
     if (command->type == ROBOT_CMD_DISARM) {
+        manager->sol_last_cancel_us = now_us;
         esp_err_t result = robot_state_machine_disarm(&manager->state_machine);
         safe_stop(manager);
         return result == ESP_OK ? ROBOT_COMMAND_ACCEPTED :
@@ -236,6 +271,9 @@ robot_command_result_t control_manager_submit(control_manager_t *manager,
     esp_err_t result = ESP_OK;
     switch (command->type) {
     case ROBOT_CMD_ARM:
+        if (manager->sol_state != SOL_OFF && manager->sol_diagnose_supply) {
+            return reject(manager, ROBOT_COMMAND_INVALID_STATE);
+        }
         result = robot_state_machine_arm(&manager->state_machine);
         if (result != ESP_OK) {
             return reject(manager, ROBOT_COMMAND_INVALID_STATE);
@@ -277,21 +315,50 @@ robot_command_result_t control_manager_submit(control_manager_t *manager,
         manager->status.servo_target_deg = command->value.servo.angle_deg;
         manager->status.servo_enabled = true;
         break;
-    case ROBOT_CMD_POWER_CONTROL:
-        /* GPIO35 is explicitly controlled and deliberately independent of motor ARM. */
+    case ROBOT_CMD_POWER_CONTROL: {
+        if (!command->value.power.asserted) {
+            manager->sol_last_cancel_us = now_us;
+            result = stop_solenoid(manager);
+            break;
+        }
+        const bool diagnose_supply = command->value.power.diagnose_supply;
+        const robot_actuator_ops_t *ops = &manager->actuator_ops;
         if (manager->state_machine.state != ROBOT_STATE_SAFE &&
             manager->state_machine.state != ROBOT_STATE_READY &&
             manager->state_machine.state != ROBOT_STATE_RUNNING) {
             return reject(manager, ROBOT_COMMAND_INVALID_STATE);
         }
-        if (manager->actuator_ops.set_power_asserted != NULL) {
-            result = manager->actuator_ops.set_power_asserted(
-                manager->actuator_context, command->value.power.asserted);
+        if (diagnose_supply) {
+            if (command->source != ROBOT_COMMAND_SOURCE_SERIAL ||
+                manager->state_machine.state != ROBOT_STATE_SAFE ||
+                ops->set_coil_enabled == NULL || ops->set_sol_supply_enabled == NULL ||
+                ops->read_sol_power_good == NULL) {
+                return reject(manager, ROBOT_COMMAND_INVALID_STATE);
+            }
+        } else if (!manager->status.sol_actuation_enabled) {
+            return reject(manager, ROBOT_COMMAND_INVALID_STATE);
         }
+        if (manager->sol_state != SOL_OFF || now_us < manager->sol_cooldown_until_us ||
+            command->received_at_us < manager->sol_last_cancel_us) {
+            return reject(manager, ROBOT_COMMAND_INVALID_STATE);
+        }
+
+        const int64_t expires_us = command->received_at_us +
+                                   manager->config.command_timeout_ms * 1000LL;
+        if (!diagnose_supply && now_us >= expires_us) {
+            return reject(manager, ROBOT_COMMAND_EXPIRED);
+        }
+
+        manager->sol_diagnose_supply = diagnose_supply;
+        manager->sol_state = SOL_WAITING_FOR_POWER;
+        manager->sol_deadline_us = now_us + SOL_PG_TIMEOUT_US;
+        manager->sol_command_expires_us = expires_us;
+        result = ops->set_coil_enabled(manager->actuator_context, false);
         if (result == ESP_OK) {
-            manager->status.power_asserted = command->value.power.asserted;
+            result = ops->set_sol_supply_enabled(manager->actuator_context, true);
         }
         break;
+    }
     default:
         return reject(manager, ROBOT_COMMAND_INVALID_ARGUMENT);
     }
@@ -330,6 +397,50 @@ static void update_axis(robot_motor_axis_t *axis, int32_t step, int64_t now_us,
     axis->output = approach(axis->output, axis->target, step);
 }
 
+static esp_err_t tick_solenoid(control_manager_t *manager, int64_t now_us)
+{
+    const robot_actuator_ops_t *ops = &manager->actuator_ops;
+    if (ops->read_sol_power_good != NULL) {
+        manager->status.sol_power_good = ops->read_sol_power_good(manager->actuator_context);
+    }
+    if (manager->sol_state == SOL_OFF) {
+        if (manager->sol_cooldown_until_us == INT64_MAX) {
+            manager->sol_cooldown_until_us = now_us + ops->sol_cooldown_ms * 1000LL;
+        }
+        return ESP_OK;
+    }
+    if (manager->state_machine.state == ROBOT_STATE_FAULT ||
+        manager->state_machine.state == ROBOT_STATE_ESTOP ||
+        (!manager->sol_diagnose_supply && now_us >= manager->sol_command_expires_us)) {
+        return stop_solenoid(manager);
+    }
+
+    const bool power_good = manager->status.sol_power_good;
+    if ((manager->sol_state == SOL_WAITING_FOR_POWER && now_us >= manager->sol_deadline_us) ||
+        (manager->sol_state != SOL_WAITING_FOR_POWER && !power_good)) {
+        robot_state_machine_latch_fault(&manager->state_machine, ROBOT_FAULT_SOL_PG);
+        safe_stop(manager);
+        return ESP_OK;
+    }
+    if (manager->sol_state != SOL_WAITING_FOR_POWER) {
+        return now_us >= manager->sol_deadline_us ? stop_solenoid(manager) : ESP_OK;
+    }
+    if (!power_good) {
+        return ESP_OK;
+    }
+    if (manager->sol_diagnose_supply) {
+        manager->sol_state = SOL_TESTING_SUPPLY;
+        manager->sol_deadline_us = now_us + SOL_DIAGNOSTIC_DURATION_US;
+        return ESP_OK;
+    }
+
+    manager->sol_state = SOL_EXTENDING;
+    manager->sol_deadline_us = now_us + ops->sol_pulse_ms * 1000LL;
+    esp_err_t result = ops->set_coil_enabled(manager->actuator_context, true);
+    manager->status.power_asserted = result == ESP_OK;
+    return result;
+}
+
 esp_err_t control_manager_tick(control_manager_t *manager, int64_t now_us)
 {
     if (manager == NULL || now_us < 0) {
@@ -339,6 +450,7 @@ esp_err_t control_manager_tick(control_manager_t *manager, int64_t now_us)
         now_us - manager->status.last_motion_command_us >
             (int64_t)manager->config.command_timeout_ms * 1000LL) {
         manager->status.watchdog_stops++;
+        manager->sol_last_cancel_us = now_us;
         /*
          * A lost control link is not a user-requested emergency stop and is
          * not a hardware fault.  Hold the last target for the configured
@@ -348,6 +460,11 @@ esp_err_t control_manager_tick(control_manager_t *manager, int64_t now_us)
         (void)robot_state_machine_disarm(&manager->state_machine);
         safe_stop(manager);
         return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t sol_result = tick_solenoid(manager, now_us);
+    if (sol_result != ESP_OK) {
+        (void)fail_hardware(manager);
+        return sol_result;
     }
     if (!robot_state_machine_allows_motion(&manager->state_machine)) {
         sync_status(manager);
