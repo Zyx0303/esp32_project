@@ -70,10 +70,9 @@ class P0StaticSafetyTests(unittest.TestCase):
                 rf"{command}.*?safe_stop\s*\(manager\)", submit, re.S
             )
             self.assertIsNotNone(branch, f"{command} must call safe_stop")
-        self.assertRegex(
-            tick,
-            r"ROBOT_FAULT_COMMAND_TIMEOUT[\s\S]*?safe_stop\s*\(manager\)",
-        )
+        self.assertRegex(tick, r"command_timeout_ms[\s\S]*?robot_state_machine_disarm")
+        self.assertRegex(tick, r"robot_state_machine_disarm[\s\S]*?safe_stop\s*\(manager\)")
+        self.assertNotIn("robot_state_machine_latch_estop", tick)
         self.assertIn("safe_stop(manager)", fault)
 
     def test_motion_commands_are_range_and_state_gated(self) -> None:
@@ -173,6 +172,26 @@ class P0StaticSafetyTests(unittest.TestCase):
         self.assertIn("xQueueSendToFront", enqueue)
         self.assertIn("xQueueReset", enqueue)
         self.assertRegex(enqueue, r"s_queue_overflow\s*=\s*true")
+
+    def test_transient_queue_pressure_is_diagnostic_not_hardware_fault(self) -> None:
+        control = source("main/app_control.c")
+        task = function_body(control, "control_task")
+        overflow_branch = re.search(
+            r"if\s*\(queue_overflow\)\s*\{(?P<body>.*?)\}", task, re.S
+        )
+        self.assertIsNotNone(overflow_branch)
+        self.assertNotIn("control_manager_report_hardware_fault", overflow_branch.group("body"))
+
+    def test_drv8833_fault_requires_consecutive_samples(self) -> None:
+        control = source("main/app_control.c")
+        self.assertRegex(
+            control,
+            r"DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES\s+3",
+        )
+        self.assertRegex(
+            control,
+            r"drv_fault_samples\s*>=\s*DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES",
+        )
 
     def test_app_main_is_only_the_composition_root(self) -> None:
         app = source("main/app_main.c")

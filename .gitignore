@@ -16,10 +16,9 @@
 # Log files
 *.log
 
-# Microsoft Word documents
-*.doc
-*.docx
-*.md
+# VibeCoding Markdown notes only
+**/*[Vv]ibe[Cc]oding*.md
+
 # Build artifacts and directories
 **/build/
 /build*/

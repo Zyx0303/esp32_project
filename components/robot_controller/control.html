@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#edf3f3">
+<title>机器人 · 手机控制</title>
+<style>
+:root{color-scheme:light;--ink:#173332;--muted:#617875;--line:#dce7e4;--green:#087f6e;--red:#b33238}
+*{box-sizing:border-box}body{margin:0;background:#edf3f3;color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:900px;margin:auto;padding:20px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 0 18px}h1{font-size:23px;margin:3px 0}h2{font-size:18px;margin:0 0 14px}.eyebrow{font-size:12px;letter-spacing:2px;color:var(--muted)}
+.badge{font-size:13px;border-radius:24px;background:#e0e9e6;padding:8px 12px;white-space:nowrap}.badge.online{background:#d8f1e7;color:#08694f}
+.safety{position:sticky;top:0;z-index:5;background:#edf3f3;padding:10px 0;border-bottom:1px solid var(--line)}.row{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap}.row>*{flex:1}.row .wide{flex:2}
+button{font:inherit;font-weight:650;min-height:48px;border:1px solid var(--line);border-radius:12px;padding:10px 14px;background:#fff;color:var(--ink);cursor:pointer;-webkit-tap-highlight-color:transparent}
+button.primary{background:var(--green);border-color:var(--green);color:white}button.danger{background:var(--red);border-color:var(--red);color:white}button:disabled{opacity:.42;cursor:default}button:focus-visible,input:focus-visible{outline:3px solid #55b5a4;outline-offset:3px}
+.notice{font-size:13px;line-height:1.5;min-height:20px;color:var(--muted);margin:10px 2px}.notice.error{color:var(--red)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:20px}.hint{color:var(--muted);font-size:13px;line-height:1.65;margin:10px 0 0}.label{display:flex;justify-content:space-between;align-items:center;font-size:14px;margin:14px 0 8px}.label output{font-variant-numeric:tabular-nums;font-weight:700}
+input[type=range]{width:100%;height:40px;accent-color:var(--green);margin:0}.pad{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-areas:". forward ." "left stop right" ". backward .";gap:10px;max-width:340px;margin:14px auto}.pad button{min-height:70px;font-size:17px;padding:10px 4px}
+.hold{touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.hold.active{background:var(--green);color:white}.pad .forward{grid-area:forward}.pad .backward{grid-area:backward}.pad [data-direction=left]{grid-area:left}.pad [data-direction=right]{grid-area:right}.pad .stop{grid-area:stop;background:#e8f2ef;color:#087060}
+.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#f3f7f5;border-radius:12px;padding:12px}.metric span{font-size:12px;color:var(--muted);display:block}.metric strong{display:block;margin-top:5px;font-size:18px;font-variant-numeric:tabular-nums}
+details{margin-top:16px}summary{cursor:pointer;font-size:14px;color:var(--muted);padding:6px 0}pre{font-size:12px;background:#f3f7f5;padding:12px;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto}footer{font-size:12px;text-align:center;color:var(--muted);padding-top:20px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}.card{padding:17px}.safety button{padding:10px 8px}main{padding-top:14px}header{margin-bottom:10px}}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow">ESP32-S3 / WI-FI</div><h1>机器人控制台</h1></div><span id="connection" class="badge" role="status">正在连接</span></header>
+<section class="safety" aria-label="安全控制">
+  <div class="row"><button id="arm" class="primary" disabled>解锁 ARM</button><button id="disarm">停止并锁定</button><button id="estop" class="danger wide">急停</button></div>
+  <p id="message" class="notice" role="status" aria-live="polite">连接后先解锁，再按住方向键。松手即停车。</p>
+</section>
+<div class="grid">
+<section class="card">
+  <h2>按住行驶</h2>
+  <label class="label" for="speed">行驶力度 <output id="speedValue">10%</output></label>
+  <input id="speed" type="range" min="10" max="100" step="10" value="10">
+  <div class="pad">
+    <button class="hold forward" data-direction="forward" data-actuator disabled>↑ 前进</button>
+    <button class="hold" data-direction="left" data-actuator disabled>← 左转</button>
+    <button id="stop" class="stop">■ 停车</button>
+    <button class="hold" data-direction="right" data-actuator disabled>右转 →</button>
+    <button class="hold backward" data-direction="backward" data-actuator disabled>↓ 后退</button>
+  </div>
+  <p class="hint">按住才行驶；松开或触摸被取消时停车。左转 / 右转采用原地差速。首次从 10% 开始。</p>
+</section>
+<section class="card">
+  <h2>设备状态</h2>
+  <div class="metrics">
+    <div class="metric"><span>安全状态</span><strong id="state">—</strong></div>
+    <div class="metric"><span>电机故障</span><strong id="fault">—</strong></div>
+    <div class="metric"><span>Motor A 实际输出</span><strong id="motorA">—</strong></div>
+    <div class="metric"><span>Motor B 实际输出</span><strong id="motorB">—</strong></div>
+    <div class="metric"><span>IMU</span><strong id="imu">—</strong></div>
+    <div class="metric"><span>外部接口 GPIO35</span><strong id="power">—</strong></div>
+  </div>
+  <p id="address" class="hint"></p>
+  <button id="clear" style="margin-top:14px;width:100%" disabled>清除故障 / 急停</button>
+  <p class="hint">清除后保持锁定，需要再次 ARM。切后台、锁屏或断线后请重新解锁。</p>
+  <details><summary>查看完整状态</summary><pre id="raw">等待设备响应…</pre></details>
+</section>
+<section class="card">
+  <h2>舵机与外部接口</h2>
+  <label class="label" for="angle">舵机角度 <output id="angleValue">90°</output></label>
+  <input id="angle" type="range" min="0" max="180" step="1" value="90">
+  <button id="servo" data-actuator disabled style="width:100%">发送角度</button>
+  <p class="hint">拖动仅设置目标，点击后才输出。停止并锁定会关闭舵机 PWM。</p>
+  <div class="row" style="margin-top:16px"><button id="powerOn" data-actuator disabled>GPIO35 置位</button><button id="powerOff" data-actuator disabled>GPIO35 释放</button></div>
+  <p class="hint">GPIO35 置位会使外部接口拉低。舵机与外部接口会保持目标；操作结束请点击「停止并锁定」，关闭全部输出。</p>
+</section>
+<section class="card">
+  <h2>双电机独立控制</h2>
+  <label class="label" for="leftMotor">Motor A <output id="leftValue">0%</output></label>
+  <input id="leftMotor" type="range" min="-100" max="100" step="10" value="0">
+  <label class="label" for="rightMotor">Motor B <output id="rightValue">0%</output></label>
+  <input id="rightMotor" type="range" min="-100" max="100" step="10" value="0">
+  <div class="row" style="margin-top:8px"><button id="direct" class="primary" data-actuator disabled>开始输出</button><button id="directStop">停止双电机</button></div>
+  <p class="hint">正负值代表相反方向。设好滑块后点击「开始输出」，电机会持续运行；点击「停止双电机」停车。调整滑块后，点击「更新输出」应用新目标。</p>
+</section>
+</div>
+<footer>无需安装 App · 手机与设备在同一 Wi-Fi，或连接 ESP32-Robot 热点</footer>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const actuatorButtons = [...document.querySelectorAll('[data-actuator]')];
+let connected = false, armed = false, authorized = false, stopping = false;
+let deviceState = 'UNKNOWN';
+let active = null, motionController = null, commandController = null, generation = 0;
+let polling = false, lastStatusAt = 0;
+const HEARTBEAT_MS = 200, STATUS_MS = 500, REQUEST_TIMEOUT_MS = 1200;
+
+function message(text, error = false) {
+  $('message').textContent = text;
+  $('message').classList.toggle('error', error);
+}
+function permitted() {
+  return connected && armed && authorized && !stopping && !document.hidden && Date.now() - lastStatusAt < 1500;
+}
+function updateButtons() {
+  actuatorButtons.forEach(button => { button.disabled = !permitted(); });
+  $('arm').disabled = !connected || armed || deviceState !== 'SAFE' || stopping || document.hidden;
+  $('clear').disabled = !connected || armed || stopping || document.hidden;
+}
+async function request(path, payload, controller = new AbortController(), keepalive = false) {
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method: payload === undefined ? 'GET' : 'POST', cache: 'no-store',
+      headers: payload === undefined ? {} : {'Content-Type': 'application/json'},
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+      signal: controller.signal, keepalive
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok !== true) throw new Error(result.error || `HTTP ${response.status}`);
+    return result;
+  } finally { clearTimeout(timeout); }
+}
+function cancelMotion() {
+  generation++;
+  if (active) active.element.classList.remove('active');
+  active = null;
+  $('direct').textContent = '开始输出';
+  if (motionController) motionController.abort();
+  motionController = null;
+}
+// Safety commands may interrupt a motor heartbeat. No motion request is queued
+// in the browser, so stopping cannot leave delayed movement to replay.
+async function safety(path, text, lock = true, keepalive = false) {
+  cancelMotion();
+  const token = generation;
+  if (commandController) commandController.abort();
+  const controller = new AbortController();
+  commandController = controller;
+  if (lock) { authorized = false; armed = false; }
+  stopping = true;
+  updateButtons();
+  const payload = path === '/api/v1/drive' ? {throttle: 0, steering: 0} : {};
+  try {
+    await request(path, payload, controller, keepalive);
+    if (token === generation) message(text);
+  } catch (error) {
+    if (token === generation) {
+      connected = false; authorized = false; armed = false;
+      $('connection').textContent = '连接异常';
+      $('connection').classList.remove('online');
+      message('停止请求未确认；请检查设备。电机仍受固件断链超时保护。', true);
+      // A failed zero command must also attempt to release all other actuators.
+      if (!lock) void request('/api/v1/disarm', {}, new AbortController(), true).catch(() => {});
+    }
+  } finally {
+    if (commandController === controller) { commandController = null; stopping = false; updateButtons(); }
+  }
+}
+function disconnected() {
+  const hadControl = authorized || active !== null;
+  connected = false; authorized = false; armed = false;
+  $('connection').textContent = '连接异常';
+  $('connection').classList.remove('online');
+  if (hadControl) void safety('/api/v1/disarm', '已请求停止并锁定', true, true);
+  else { cancelMotion(); updateButtons(); }
+  message('无法读取设备状态；检查 Wi-Fi。恢复连接后需要重新解锁。', true);
+}
+async function pollStatus() {
+  if (polling || document.hidden || stopping) return;
+  polling = true;
+  const token = generation;
+  try {
+    const result = await request('/api/v1/status');
+    if (document.hidden || token !== generation || stopping) return;
+    const wasConnected = connected;
+    lastStatusAt = Date.now(); connected = true; armed = result.armed === true;
+    deviceState = result.state;
+    if (!armed) { authorized = false; if (active) cancelMotion(); }
+    $('connection').textContent = '已连接'; $('connection').classList.add('online');
+    $('state').textContent = result.state;
+    $('fault').textContent = result.drv8833_fault || result.faults ? '故障' : '正常';
+    $('motorA').textContent = `${result.motor_a.output}%`;
+    $('motorB').textContent = `${result.motor_b.output}%`;
+    $('imu').textContent = result.imu.valid ? '采样中' : '不可用';
+    $('power').textContent = result.power ? '已置位' : '已释放';
+    $('raw').textContent = JSON.stringify(result, null, 2);
+    if (!wasConnected) message(armed
+      ? '设备已解锁，请先停止并锁定，再从本页解锁。'
+      : '已连接。先解锁，再按住方向键。松手即停车。');
+    updateButtons();
+  } catch (error) { if (token === generation && !document.hidden && !stopping) disconnected(); }
+  finally { polling = false; }
+}
+async function command(path, payload, text, unlock = false) {
+  if (stopping || document.hidden || (unlock ? !connected || armed || deviceState !== 'SAFE' : !permitted())) return;
+  // Servo / GPIO requests are explicit one-shot actions. Avoid mixing them with
+  // an active motor control or with another pending user command.
+  if (active || commandController) { message('请先停止电机输出，再操作其他执行器。'); return; }
+  const controller = new AbortController(), token = ++generation;
+  commandController = controller; stopping = true; updateButtons();
+  try {
+    await request(path, payload, controller);
+    if (token !== generation || document.hidden) return;
+    if (unlock) {
+      // HTTP ACK only confirms enqueueing. Wait for the control task's actual
+      // ARM state before allowing movement; do not infer it from the ACK.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const result = await request('/api/v1/status', undefined, controller);
+        if (token !== generation || document.hidden) return;
+        lastStatusAt = Date.now(); armed = result.armed === true;
+        deviceState = result.state;
+        if (armed || result.state === 'FAULT' || result.state === 'ESTOP') break;
+        // Give the 100 Hz control task time to consume the enqueued ARM.
+        if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 100));
+        if (token !== generation || document.hidden) return;
+      }
+      authorized = armed;
+      if (!armed) throw new Error('设备未解锁，请检查急停与故障状态');
+    }
+    message(text);
+  } catch (error) {
+    if (token === generation) {
+      message(`命令未确认：${error.message}`, true);
+      void safety('/api/v1/disarm', `命令未确认：${error.message}；已请求停止并锁定`, true, true);
+    }
+  } finally {
+    if (commandController === controller) { commandController = null; stopping = false; updateButtons(); }
+  }
+}
+function motionPayload() {
+  const speed = +$('speed').value;
+  switch (active.direction) {
+    case 'forward': return {throttle: speed, steering: 0};
+    case 'backward': return {throttle: -speed, steering: 0};
+    case 'left': return {throttle: 0, steering: -speed};
+    case 'right': return {throttle: 0, steering: speed};
+    default: return active.payload;
+  }
+}
+async function sendMotion() {
+  if (!active || motionController || !permitted()) return;
+  const held = active, controller = new AbortController();
+  motionController = controller;
+  try { await request(held.direction === 'direct' ? '/api/v1/motors' : '/api/v1/drive', motionPayload(), controller); }
+  catch (error) { if (active === held) disconnected(); }
+  finally { if (motionController === controller) motionController = null; }
+}
+function startMotion(event, direction) {
+  if (!permitted() || active || commandController || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  event.preventDefault();
+  const element = event.currentTarget;
+  active = {element, pointerId: event.pointerId, direction};
+  element.classList.add('active');
+  element.setPointerCapture(event.pointerId);
+  message('正在输出；松手即停车。');
+  void sendMotion();
+}
+function releaseMotion(event) {
+  if (active && active.direction !== 'direct' && active.pointerId === event.pointerId) void safety('/api/v1/drive', '已发送停车命令', false);
+}
+function startDirect() {
+  if (!permitted() || commandController) return;
+  if (active && active.direction !== 'direct') { message('请先松开方向键，再开始独立输出。'); return; }
+  if (!active) active = {element: $('direct'), pointerId: null, direction: 'direct'};
+  // Commit the slider values only on a click. Heartbeats repeat that target;
+  // moving a slider alone must not change an already-running motor.
+  active.payload = {motor_a: +$('leftMotor').value, motor_b: +$('rightMotor').value};
+  $('direct').textContent = '更新输出';
+  message('双电机正在持续输出；点击「停止双电机」停车。');
+  void sendMotion();
+}
+document.querySelectorAll('.hold').forEach(button => {
+  button.addEventListener('pointerdown', event => startMotion(event, button.dataset.direction));
+  button.addEventListener('contextmenu', event => event.preventDefault());
+  button.addEventListener('lostpointercapture', releaseMotion);
+});
+window.addEventListener('pointerup', releaseMotion);
+window.addEventListener('pointercancel', releaseMotion);
+function leavePage() {
+  // Abort any pending ARM too. Keepalive is best effort; the firmware watchdog
+  // remains the fallback when the phone suspends or loses its network.
+  if (authorized || active || commandController) void safety('/api/v1/disarm', '页面已暂停，请重新解锁', true, true);
+  else { cancelMotion(); authorized = false; updateButtons(); }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) leavePage(); else void pollStatus(); });
+window.addEventListener('pagehide', leavePage);
+window.addEventListener('blur', leavePage);
+window.addEventListener('offline', disconnected);
+window.addEventListener('online', () => { void pollStatus(); });
+$('arm').onclick = () => { void command('/api/v1/arm', {}, '已解锁，请按住方向键行驶。', true); };
+$('disarm').onclick = () => { void safety('/api/v1/disarm', '已请求停止并锁定'); };
+$('estop').onclick = () => { void safety('/api/v1/estop', '已请求急停；排除原因后清除，再重新解锁。'); };
+$('clear').onclick = () => { void safety('/api/v1/fault/clear', '已请求清除；确认 SAFE 后再解锁。'); };
+function stopMotors() {
+  $('leftMotor').value = $('rightMotor').value = '0';
+  $('leftValue').textContent = $('rightValue').textContent = '0%';
+  void safety('/api/v1/drive', '已发送停车命令', false);
+}
+$('stop').onclick = stopMotors;
+$('directStop').onclick = stopMotors;
+$('direct').onclick = startDirect;
+$('servo').onclick = () => { void command('/api/v1/servo', {angle: +$('angle').value}, '舵机目标已提交'); };
+$('powerOn').onclick = () => { void command('/api/v1/power', {asserted: true}, 'GPIO35 置位请求已提交'); };
+$('powerOff').onclick = () => { void command('/api/v1/power', {asserted: false}, 'GPIO35 释放请求已提交'); };
+[['speed','speedValue','%'],['angle','angleValue','°'],['leftMotor','leftValue','%'],['rightMotor','rightValue','%']].forEach(([id,out,unit]) => {
+  $(id).addEventListener('input', () => { $(out).textContent = $(id).value + unit; });
+});
+$('address').textContent = `当前设备：${location.host}`;
+setInterval(() => { if (active && !permitted()) disconnected(); else void sendMotion(); }, HEARTBEAT_MS);
+setInterval(() => { void pollStatus(); }, STATUS_MS);
+void pollStatus();
+</script>
+</body>
+</html>

@@ -29,11 +29,37 @@ class ControlLauncherTests(unittest.TestCase):
         self.assertFalse(LAUNCHER.is_robot_device({"ok": True, "api_version": 1}))
         self.assertFalse(LAUNCHER.is_robot_device({"ok": True, "api_version": 2, "target": "esp32s3"}))
 
-    def test_subnet_candidates_exclude_local_address(self) -> None:
-        candidates = list(LAUNCHER.subnet_candidates(ipaddress.IPv4Address("172.26.96.110")))
+    def test_subnet_candidates_exclude_all_local_addresses(self) -> None:
+        network = ipaddress.IPv4Network("172.26.96.0/24")
+        with patch.object(
+            LAUNCHER,
+            "local_ipv4_addresses",
+            return_value=[ipaddress.IPv4Address("172.26.96.110")],
+        ):
+            candidates = list(LAUNCHER.subnet_candidates(network))
         self.assertEqual(len(candidates), 253)
         self.assertIn("http://172.26.96.61", candidates)
         self.assertNotIn("http://172.26.96.110", candidates)
+
+    def test_lan_candidates_scans_actual_network_not_assumed_24(self) -> None:
+        with (
+            patch.object(
+                LAUNCHER,
+                "local_ipv4_networks",
+                return_value=[ipaddress.IPv4Network("192.168.4.0/29")],
+            ),
+            patch.object(
+                LAUNCHER,
+                "local_ipv4_addresses",
+                return_value=[ipaddress.IPv4Address("192.168.4.2")],
+            ),
+        ):
+            candidates = list(LAUNCHER.lan_candidates())
+        self.assertEqual(
+            candidates,
+            ["http://192.168.4.1", "http://192.168.4.3", "http://192.168.4.4",
+             "http://192.168.4.5", "http://192.168.4.6"],
+        )
 
     def test_local_addresses_are_unique_and_non_loopback(self) -> None:
         addresses = LAUNCHER.local_ipv4_addresses()

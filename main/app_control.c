@@ -17,6 +17,8 @@ static const char *TAG = "app_control";
 
 #define COMMAND_QUEUE_LENGTH 16
 #define CONTROL_PERIOD_MS 10
+#define DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES 3
+#define DRV_FAULT_CLEAR_DEBOUNCE_SAMPLES 10
 
 static control_manager_t s_control_manager;
 static QueueHandle_t s_command_queue;
@@ -226,6 +228,8 @@ static void control_task(void *argument)
     (void)argument;
     TickType_t last_wake = xTaskGetTickCount();
     bool drv8833_fault_active = false;
+    uint8_t drv_fault_samples = 0;
+    uint8_t drv_clear_samples = 0;
 
     while (true) {
         robot_command_t command;
@@ -246,18 +250,43 @@ static void control_task(void *argument)
         s_queue_overflow = false;
         portEXIT_CRITICAL(&s_queue_lock);
         if (queue_overflow) {
-            control_manager_report_hardware_fault(&s_control_manager,
-                                                  ROBOT_FAULT_QUEUE_OVERFLOW);
+            /*
+             * A burst of replaceable network commands is not a hardware
+             * failure.  The rejected command and overflow counter remain
+             * visible, while the watchdog still covers a genuinely lost
+             * control stream.
+             */
+            ESP_LOGW(TAG, "command queue overflow; command dropped without fault latch");
         }
 
         if (app_actuators_motor_available()) {
-            bool fault_active = false;
-            esp_err_t fault_err = app_actuators_read_motor_fault(&fault_active);
-            drv8833_fault_active = fault_err != ESP_OK || fault_active;
-            if (drv8833_fault_active) {
+            bool fault_sample = false;
+            esp_err_t fault_err = app_actuators_read_motor_fault(&fault_sample);
+            fault_sample = fault_err != ESP_OK || fault_sample;
+            if (fault_sample) {
+                drv_clear_samples = 0;
+                if (drv_fault_samples < DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES) {
+                    drv_fault_samples++;
+                }
+            } else {
+                drv_fault_samples = 0;
+                if (drv_clear_samples < DRV_FAULT_CLEAR_DEBOUNCE_SAMPLES) {
+                    drv_clear_samples++;
+                }
+            }
+
+            if (!drv8833_fault_active &&
+                drv_fault_samples >= DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES) {
+                drv8833_fault_active = true;
+                ESP_LOGE(TAG, "DRV8833 nFAULT remained active for %d ms; latching fault",
+                         DRV_FAULT_ASSERT_DEBOUNCE_SAMPLES * CONTROL_PERIOD_MS);
                 control_manager_report_hardware_fault(&s_control_manager,
                                                       ROBOT_FAULT_DRV8833);
-            } else {
+            } else if (drv8833_fault_active &&
+                       drv_clear_samples >= DRV_FAULT_CLEAR_DEBOUNCE_SAMPLES) {
+                drv8833_fault_active = false;
+                ESP_LOGW(TAG, "DRV8833 nFAULT recovered for %d ms; CLEAR is now allowed",
+                         DRV_FAULT_CLEAR_DEBOUNCE_SAMPLES * CONTROL_PERIOD_MS);
                 control_manager_clear_hardware_fault(&s_control_manager,
                                                      ROBOT_FAULT_DRV8833);
             }
@@ -303,6 +332,9 @@ esp_err_t app_control_start(const robot_config_t *config)
                         "validated configuration required");
 
     robot_control_config_t control_config = make_control_config(config);
+    ESP_LOGI(TAG, "motion link grace=%" PRIu32
+                  " ms; timeout stops and disarms to SAFE",
+             control_config.command_timeout_ms);
     if (s_strategy_ops != NULL && s_strategy_ops->init != NULL) {
         ESP_RETURN_ON_ERROR(s_strategy_ops->init(s_strategy_context, &control_config),
                             TAG, "initialize control strategy");

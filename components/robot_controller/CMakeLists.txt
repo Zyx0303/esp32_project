@@ -10,6 +10,7 @@ idf_component_register(
         "control_manager.c"
         "wifi_control.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "control.html"
     REQUIRES driver esp_timer nvs_flash json
              esp_wifi esp_event esp_netif esp_http_server fatfs wear_levelling esp_partition
 )

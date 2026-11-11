@@ -119,16 +119,22 @@ static void test_watchdog_and_fault_clear(void)
 {
     fake_actuators_t fake;
     robot_control_config_t config = control_manager_default_config();
+    CHECK(config.command_timeout_ms == 3000);
     config.command_timeout_ms = 100;
     control_manager_t manager = make_manager(&fake, config);
     arm(&manager, 1, 1000000);
     robot_command_t drive = command(ROBOT_CMD_DRIVE, 2, 1000000);
     drive.value.drive.throttle = 20;
     CHECK(control_manager_submit(&manager, &drive, 1000000) == ROBOT_COMMAND_ACCEPTED);
+    CHECK(control_manager_tick(&manager, 1099999) == ESP_OK);
+    CHECK(manager.state_machine.state == ROBOT_STATE_RUNNING);
     CHECK(control_manager_tick(&manager, 1100001) == ESP_ERR_TIMEOUT);
-    CHECK(manager.state_machine.state == ROBOT_STATE_ESTOP);
-    CHECK((manager.state_machine.faults & ROBOT_FAULT_COMMAND_TIMEOUT) != 0);
+    CHECK(manager.state_machine.state == ROBOT_STATE_SAFE);
+    CHECK(!manager.state_machine.estop_latched);
+    CHECK(manager.state_machine.faults == ROBOT_FAULT_NONE);
     CHECK(fake.motor_sleep && fake.motor_a == 0 && fake.motor_b == 0);
+    robot_command_t rearm = command(ROBOT_CMD_ARM, 3, 1100001);
+    CHECK(control_manager_submit(&manager, &rearm, 1100001) == ROBOT_COMMAND_ACCEPTED);
 
     manager = make_manager(&fake, control_manager_default_config());
     arm(&manager, 1, 2000000);

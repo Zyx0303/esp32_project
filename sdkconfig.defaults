@@ -25,5 +25,9 @@ CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE=n
 CONFIG_ESP_WIFI_ENABLED=y
 # CONFIG_BT_ENABLED is not set
 
+# Mobile browsers send longer User-Agent / Accept headers than the 512-byte
+# ESP-IDF default. This limits the entire request header section, not each field.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=4096
+
 CONFIG_BOOTLOADER_LOG_LEVEL=3
 CONFIG_ESP_SYSTEM_LOG_LEVEL=3

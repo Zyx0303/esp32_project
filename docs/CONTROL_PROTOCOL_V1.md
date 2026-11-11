@@ -6,7 +6,7 @@
 - Rescue SoftAP: `ESP32-Robot`; fallback address `http://192.168.4.1`.
 - All state-changing v1 operations use `POST` with `Content-Type: application/json`.
 - All commands are validated, timestamped, assigned a sequence number and placed in the control queue. HTTP handlers never drive hardware directly.
-- Non-zero motor commands must be refreshed before the configured command timeout (default 1000 ms).
+- Non-zero motor commands must be refreshed before the configured link-loss grace period (default 3000 ms).
 
 ## State and safety
 
@@ -15,6 +15,9 @@ The state sequence is `BOOT -> SAFE -> READY -> RUNNING`. `FAULT` and `ESTOP` ar
 - The device starts in `SAFE`; actuators cannot move before `ARM`.
 - `ESTOP` and `DISARM` have queue priority.
 - `ESTOP` can be submitted regardless of command age or normal sequence ordering.
+- A command timeout holds the last motion target for the grace period, then stops all motion and disarms to `SAFE`; it does not latch `ESTOP` or a hardware fault.
+- Transient normal-command queue overflow drops and counts the affected command without latching `FAULT`.
+- DRV8833 `nFAULT` must remain active for 30 ms before it is latched; it must remain inactive for 100 ms before CLEAR can succeed.
 - `fault/clear` returns the state to `SAFE` only after active hardware faults are gone.
 - Clearing a fault does not ARM the robot.
 

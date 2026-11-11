@@ -21,7 +21,7 @@ void robot_config_defaults(robot_config_t *config)
         .invert_motor_b = false,
         .motor_ramp_step_percent = 5,
         .motor_reverse_deadtime_ms = 50,
-        .command_timeout_ms = 1000,
+        .command_timeout_ms = 3000,
         .servo_min_angle_deg = 0,
         .servo_max_angle_deg = 180,
         .servo_center_angle_deg = 90,

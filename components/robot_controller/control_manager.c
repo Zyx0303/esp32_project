@@ -34,8 +34,8 @@ static int16_t approach(int16_t current, int16_t target, int32_t maximum_step)
 robot_control_config_t control_manager_default_config(void)
 {
     return (robot_control_config_t) {
-        .command_timeout_ms = 1000,
-        .command_max_age_ms = 1000,
+        .command_timeout_ms = 3000,
+        .command_max_age_ms = 3000,
         .reverse_deadtime_ms = 30,
         .motor_ramp_percent_per_10ms = 5,
         .invert_motor_a = false,
@@ -339,9 +339,13 @@ esp_err_t control_manager_tick(control_manager_t *manager, int64_t now_us)
         now_us - manager->status.last_motion_command_us >
             (int64_t)manager->config.command_timeout_ms * 1000LL) {
         manager->status.watchdog_stops++;
-        robot_state_machine_latch_fault(&manager->state_machine,
-                                        ROBOT_FAULT_COMMAND_TIMEOUT);
-        robot_state_machine_latch_estop(&manager->state_machine);
+        /*
+         * A lost control link is not a user-requested emergency stop and is
+         * not a hardware fault.  Hold the last target for the configured
+         * grace period, then disarm to SAFE.  Reconnection therefore needs a
+         * fresh ARM, but never needs CLEAR merely because Wi-Fi disappeared.
+         */
+        (void)robot_state_machine_disarm(&manager->state_machine);
         safe_stop(manager);
         return ESP_ERR_TIMEOUT;
     }

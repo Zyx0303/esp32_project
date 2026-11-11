@@ -18,6 +18,11 @@
 #include "freertos/FreeRTOS.h"
 #include "robot_state_machine.h"
 
+// sdkconfig.defaults only seeds new configurations. Fail explicitly if an old
+// local sdkconfig still keeps ESP-IDF's 512-byte limit (HTTP 431 on phones).
+_Static_assert(CONFIG_HTTPD_MAX_REQ_HDR_LEN >= 4096,
+               "Phone HTTP control requires CONFIG_HTTPD_MAX_REQ_HDR_LEN >= 4096; update sdkconfig/menuconfig");
+
 // 私密凭据只放在被 Git 忽略的本地头文件；缺失时仍可构建救援 AP 固件。
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -194,28 +199,8 @@ static void network_event_handler(void *argument, esp_event_base_t event_base,
     }
 }
 
-static const char CONTROL_PAGE[] =
-    "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>ESP32 Robot</title><style>body{font-family:system-ui;max-width:600px;margin:auto;padding:24px}"
-    "button{font-size:18px;padding:12px;margin:5px}input{width:100%}.danger{background:#d33;color:white}"
-    "pre{background:#eee;padding:12px;overflow:auto}</style></head><body>"
-    "<h1>ESP32-S3 Robot</h1><p>上电默认锁定。先解锁，控制中断后固件会自动急停。</p>"
-    "<button onclick=post('/api/v1/arm')>ARM 解锁</button>"
-    "<button onclick=post('/api/v1/disarm')>DISARM</button>"
-    "<button class=danger onclick=post('/api/v1/estop')>急停</button>"
-    "<button onclick=post('/api/v1/fault/clear')>清除故障</button>"
-    "<h2>行驶</h2><label>油门 <span id=tv>0</span></label><input id=t type=range min=-100 max=100 value=0>"
-    "<label>转向 <span id=sv>0</span></label><input id=s type=range min=-100 max=100 value=0>"
-    "<button onclick=drive()>发送</button><button class=danger onclick=drive(0,0)>停车</button>"
-    "<h2>舵机</h2><input id=a type=range min=0 max=180 value=90>"
-    "<button onclick=servo()>发送角度</button><h2>状态</h2><pre id=status></pre>"
-    "<script>const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):''});"
-    "t.oninput=()=>tv.textContent=t.value;s.oninput=()=>sv.textContent=s.value;"
-    "function drive(x,y){post('/api/v1/drive',{throttle:x??+t.value,steering:y??+s.value})}"
-    "function servo(){post('/api/v1/servo',{angle:+a.value})}"
-    "setInterval(()=>fetch('/api/v1/status',{cache:'no-store'}).then(r=>r.json()).then(j=>status.textContent=JSON.stringify(j,null,2)).catch(()=>{}),500);"
-    "</script></body></html>";
+// The complete, offline-capable phone UI is embedded in Flash by ESP-IDF.
+extern const char control_html_start[] asm("_binary_control_html_start");
 
 static void common_headers(httpd_req_t *req)
 {
@@ -248,7 +233,7 @@ static esp_err_t root_handler(httpd_req_t *req)
 {
     common_headers(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, CONTROL_PAGE, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, control_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_handler(httpd_req_t *req)
@@ -499,6 +484,7 @@ static esp_err_t start_http_server(void)
     config.lru_purge_enable = true;
     config.max_uri_handlers = 24;
     ESP_RETURN_ON_ERROR(httpd_start(&s_http_server, &config), TAG, "start HTTP server");
+    ESP_LOGI(TAG, "HTTP request header limit: %d bytes", CONFIG_HTTPD_MAX_REQ_HDR_LEN);
 
     const httpd_uri_t handlers[] = {
         {.uri = "/", .method = HTTP_GET, .handler = root_handler},

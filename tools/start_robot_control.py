@@ -21,6 +21,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -112,12 +113,63 @@ def local_ipv4_addresses() -> list[ipaddress.IPv4Address]:
     return sorted(addresses, key=int)
 
 
-def subnet_candidates(local_ip: ipaddress.IPv4Address | None) -> Iterable[str]:
-    """生成当前 /24 局域网候选；手机热点和本项目现场网络均使用 /24。"""
-    if local_ip is None or local_ip.is_loopback or local_ip.is_link_local:
+def local_ipv4_networks() -> list[ipaddress.IPv4Network]:
+    """读取 Windows 适配器的 IPv4 地址和掩码，返回实际直连网段。
+
+    不能只从默认路由推断 /24：电脑同时连接 VPN、有线网或手机热点时，
+    目标设备可能位于另一个接口，且其掩码也未必是 /24。
+    """
+    if os.name != "nt":
+        return [ipaddress.IPv4Network(f"{address}/24", strict=False)
+                for address in local_ipv4_addresses()]
+    try:
+        output = subprocess.run(
+            ["ipconfig"], capture_output=True, text=True, errors="replace", check=False,
+        ).stdout
+    except OSError:
+        return []
+
+    networks: set[ipaddress.IPv4Network] = set()
+    address: ipaddress.IPv4Address | None = None
+    for line in output.splitlines() + [""]:
+        # ipconfig 的英文/中文输出都在字段名后以冒号给出 IPv4 值；
+        # 仅匹配合法 IPv4，避免把 DNS、网关等值误作接口地址。
+        values = re.findall(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])", line)
+        lowered = line.lower()
+        if "ipv4" in lowered or "ipv4" in line:
+            try:
+                address = ipaddress.IPv4Address(values[-1]) if values else None
+            except ipaddress.AddressValueError:
+                address = None
+        elif ("subnet mask" in lowered or "\u5b50\u7f51\u63a9\u7801" in line) and address is not None:
+            try:
+                network = ipaddress.IPv4Network(f"{address}/{values[-1]}", strict=False)
+            except (IndexError, ValueError, ipaddress.AddressValueError):
+                continue
+            if not network.is_loopback and not network.network_address.is_link_local:
+                networks.add(network)
+            address = None
+        elif not line.strip():
+            address = None
+    return sorted(networks, key=lambda network: (int(network.network_address), network.prefixlen))
+
+
+def subnet_candidates(local_network: ipaddress.IPv4Network | None) -> Iterable[str]:
+    """生成一个实际局域网内所有主机候选，排除本机地址。"""
+    if local_network is None or local_network.is_loopback:
         return ()
-    network = ipaddress.IPv4Network(f"{local_ip}/24", strict=False)
-    return (f"http://{host}" for host in network.hosts() if host != local_ip)
+    local_addresses = set(local_ipv4_addresses())
+    return (f"http://{host}" for host in local_network.hosts() if host not in local_addresses)
+
+
+def lan_candidates() -> Iterable[str]:
+    """最后阶段的完整 LAN 扫描；跨接口去重且绝不探测本机。"""
+    seen: set[str] = set()
+    for network in local_ipv4_networks():
+        for candidate in subnet_candidates(network):
+            if candidate not in seen:
+                seen.add(candidate)
+                yield candidate
 
 
 def discover_device(
@@ -139,13 +191,13 @@ def discover_device(
         if payload is not None:
             return candidate, payload
 
+    # 已知地址和救援 AP 已失败后，最后扫描每张本机 LAN 网卡的完整网段。
     candidates: list[str] = []
     seen: set[str] = set(preferred)
-    for local_ip in local_ipv4_addresses():
-        for candidate in subnet_candidates(local_ip):
-            if candidate not in seen:
-                seen.add(candidate)
-                candidates.append(candidate)
+    for candidate in lan_candidates():
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
     if not candidates:
         return None
 
@@ -182,11 +234,10 @@ def discover_devices(
 
     candidates = list(preferred)
     seen = set(preferred)
-    for local_ip in local_ipv4_addresses():
-        for candidate in subnet_candidates(local_ip):
-            if candidate not in seen:
-                seen.add(candidate)
-                candidates.append(candidate)
+    for candidate in lan_candidates():
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
 
     found: list[tuple[str, dict[str, object]]] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:

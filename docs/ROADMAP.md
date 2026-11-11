@@ -18,7 +18,7 @@
 - [x] Wi-Fi SoftAP、HTTP 控制接口和浏览器控制页。
 - [x] Python 图形上位机基础控制程序。
 - [x] 串口调试命令：电机、舵机、I2C 扫描、IMU 和 GPIO35 控制。
-- [x] 1 秒电机通信看门狗，控制中断后自动停车。
+- [x] 3 秒断链宽限期；控制未恢复时自动停车并回到 SAFE，不把普通断网锁存为 ESTOP。
 - [x] 2026-08-01 Debug/Release 独立干净构建成功：Debug `0xCE400`（剩余 19%），Release `0xAAD40`（剩余 33%）。
 - [x] 2026-08-01 旧 PCB 无运动冒烟测试通过：烧录、启动、串口、FreeRTOS、Wi-Fi 关联、ARM 门禁和 MPU6050 100 Hz；详见 [`HARDWARE_SMOKE_TEST_2026-08-01.md`](HARDWARE_SMOKE_TEST_2026-08-01.md)。
 - [x] 将 `app_main.c` 拆分为状态、执行器、控制、IMU、串口和启动编排模块。

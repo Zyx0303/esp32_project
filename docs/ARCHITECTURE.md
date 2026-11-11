@@ -57,7 +57,7 @@ UART0  ── app_console.c ───────► 同一命令队列
 - 安全控制：`POST /api/v1/arm|disarm|estop|fault/clear`
 - 差速/独立电机：`POST /api/v1/drive|motors`
 - 舵机/GPIO35：`POST /api/v1/servo|power`
-- 安全策略：上电保持 SAFE，ARM 后才允许运动；超时、DISARM、ESTOP、nFAULT 均执行同一硬件安全停止
+- 安全策略：上电保持 SAFE，ARM 后才允许运动；3 秒断链超时回 SAFE，nFAULT 连续 30 ms 后进入 FAULT，DISARM/ESTOP 仍立即执行统一硬件安全停止
 
 完整接口见 [`CONTROL_PROTOCOL_V1.md`](CONTROL_PROTOCOL_V1.md)。
 
