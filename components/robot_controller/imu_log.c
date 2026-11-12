@@ -10,12 +10,15 @@
 #include "freertos/semphr.h"
 #include "esp_vfs_fat.h"
 #include "esp_partition.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "ff.h"
 #include "diskio_wl.h"
 #include "wear_levelling.h"
 
 #define LOG_ROOT "/imu"
+#define LOG_PARTITION "imu_logs"
+static const char *TAG = "imu_log";
 #define QUEUE_LENGTH 256
 /* Leave room for buffered writes and the log footer on the mounted volume. */
 #define LOG_FREE_RESERVE (16 * 1024)
@@ -117,20 +120,32 @@ esp_err_t imu_log_init(void)
 {
     /* Only format a completely erased partition. Never auto-format existing logs on mount failure. */
     const esp_partition_t *partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "imu_data");
-    if (!partition) return ESP_ERR_NOT_FOUND;
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, LOG_PARTITION);
+    if (!partition) {
+        ESP_LOGE(TAG, "Missing FAT partition %s", LOG_PARTITION);
+        return ESP_ERR_NOT_FOUND;
+    }
     bool blank = true;
     uint8_t block[256];
     for (size_t offset = 0; offset < partition->size && blank; offset += sizeof(block)) {
         esp_err_t err = esp_partition_read(partition, offset, block, sizeof(block));
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Cannot read %s at offset 0x%zx: %s",
+                     LOG_PARTITION, offset, esp_err_to_name(err));
+            return err;
+        }
         for (size_t i = 0; i < sizeof(block); ++i) if (block[i] != 0xff) { blank = false; break; }
     }
     esp_vfs_fat_mount_config_t config = {
         .format_if_mount_failed = blank, .max_files = 2, .allocation_unit_size = 4096,
     };
-    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(LOG_ROOT, "imu_data", &config, &s_wl);
-    if (err != ESP_OK) return err;
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(LOG_ROOT, LOG_PARTITION, &config, &s_wl);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot mount %s (blank=%d): %s",
+                 LOG_PARTITION, blank, esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "Mounted %s at %s", LOG_PARTITION, LOG_ROOT);
     s_queue = xQueueCreate(QUEUE_LENGTH, sizeof(log_sample_t));
     s_file_lock = xSemaphoreCreateMutex();
     if (!s_queue || !s_file_lock) {
